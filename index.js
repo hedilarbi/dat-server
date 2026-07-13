@@ -24,7 +24,8 @@ const defaultAllowedOrigins = [
   'http://localhost:8082',
   'http://127.0.0.1:8081',
   'http://127.0.0.1:8082',
-  'https://dat-client.vercel.app'
+  'https://dat-client.vercel.app',
+  'https://dat-admin-cyan.vercel.app'
 ];
 const configuredOrigins = process.env.CLIENT_URL
   ? process.env.CLIENT_URL.split(',').map(origin => origin.trim()).filter(Boolean)
