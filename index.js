@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const cookieParser = require('cookie-parser');
+const os = require('os');
 const connectDB = require('./config/db');
 const seedAdmin = require('./utils/seedAdmin');
 const { errorHandler } = require('./middlewares/error.middleware');
@@ -15,9 +16,29 @@ connectDB().then(() => {
   seedAdmin();
 });
 
+const defaultAllowedOrigins = [
+  'http://localhost:3000',
+  'http://localhost:3001',
+  'http://localhost:19006',
+  'http://localhost:8081',
+  'http://localhost:8082',
+  'http://127.0.0.1:8081',
+  'http://127.0.0.1:8082',
+];
+const configuredOrigins = process.env.CLIENT_URL
+  ? process.env.CLIENT_URL.split(',').map(origin => origin.trim()).filter(Boolean)
+  : defaultAllowedOrigins;
+const expoDevOriginPattern = /^http:\/\/(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+):\d+$/;
+
 // Middlewares globaux
 app.use(cors({
-  origin: process.env.CLIENT_URL || ['http://localhost:3000', 'http://localhost:3001', 'http://localhost:19006'], // URL Next client, Next admin, Expo web
+  origin(origin, callback) {
+    if (!origin || configuredOrigins.includes(origin) || expoDevOriginPattern.test(origin)) {
+      callback(null, true);
+      return;
+    }
+    callback(new Error(`Origine CORS non autorisée : ${origin}`));
+  },
   credentials: true, // Autorise l'envoi de cookies JWT
 }));
 app.use(express.json());
@@ -46,6 +67,13 @@ app.use(errorHandler);
 
 // Démarrage du serveur
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`Serveur DealsAutoPro démarré sur le port ${PORT}`);
+const HOST = process.env.HOST || '0.0.0.0';
+app.listen(PORT, HOST, () => {
+  const lanAddress = Object.values(os.networkInterfaces())
+    .flat()
+    .find(iface => iface && iface.family === 'IPv4' && !iface.internal)?.address;
+  console.log(`Serveur DealsAutoPro démarré sur http://${HOST}:${PORT}`);
+  if (lanAddress) {
+    console.log(`URL mobile LAN : http://${lanAddress}:${PORT}`);
+  }
 });
