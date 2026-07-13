@@ -36,29 +36,46 @@ const uploadFile = async (req, res, next) => {
           provider: 'firebase'
         });
       } catch (fbError) {
-        console.warn('Erreur Firebase Storage, bascule sur le stockage local :', fbError.message);
+        console.error('Erreur Firebase Storage, tentative de bascule sur le stockage local :', fbError);
+
+        // Fallback : stockage local sur disque (/uploads), utile en développement quand
+        // Firebase n'est pas configuré. En production serverless (fs en lecture seule hors
+        // /tmp, instances éphémères), cette écriture échoue systématiquement — dans ce cas on
+        // remonte l'erreur Firebase d'origine plutôt que de laisser l'échec du fallback (ex.
+        // ENOENT sur mkdir) masquer la vraie cause.
+        try {
+          const uploadDir = path.join(__dirname, '../uploads');
+          if (!fs.existsSync(uploadDir)) {
+            fs.mkdirSync(uploadDir, { recursive: true });
+          }
+
+          const localFilename = `${timestamp}_${safeOriginalName}`;
+          const filePath = path.join(uploadDir, localFilename);
+          fs.writeFileSync(filePath, req.file.buffer);
+
+          const baseUrl = process.env.API_URL || `${req.protocol}://${req.get('host')}`;
+          const localUrl = `${baseUrl}/uploads/${localFilename}`;
+
+          return res.status(200).json({
+            success: true,
+            url: localUrl,
+            filename: localFilename,
+            provider: 'local'
+          });
+        } catch (localError) {
+          console.error('Échec du fallback de stockage local :', localError);
+          const error = new Error("Le service de stockage de fichiers est momentanément indisponible. Veuillez réessayer plus tard ou contacter le support.");
+          error.statusCode = 502;
+          error.codeName = 'upload.storage_unavailable';
+          throw error;
+        }
       }
     }
 
-    // Fallback : Stockage local sur le serveur (/uploads) si Firebase Storage échoue ou non initialisé
-    const uploadDir = path.join(__dirname, '../uploads');
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true });
-    }
-
-    const localFilename = `${timestamp}_${safeOriginalName}`;
-    const filePath = path.join(uploadDir, localFilename);
-    fs.writeFileSync(filePath, req.file.buffer);
-
-    const baseUrl = process.env.API_URL || `${req.protocol}://${req.get('host')}`;
-    const localUrl = `${baseUrl}/uploads/${localFilename}`;
-
-    return res.status(200).json({
-      success: true,
-      url: localUrl,
-      filename: localFilename,
-      provider: 'local'
-    });
+    const error = new Error("Le service de stockage de fichiers n'est pas configuré.");
+    error.statusCode = 503;
+    error.codeName = 'upload.storage_not_configured';
+    throw error;
   } catch (error) {
     next(error);
   }
