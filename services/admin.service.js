@@ -1,10 +1,17 @@
 const User = require('../models/user.model');
 const RefusalReason = require('../models/refusalReason.model');
 const { sendEmail } = require('../config/mail');
-const { Expo } = require('expo-server-sdk');
 const { normalizeLanguage, approvalEmail, rejectionEmail, correctionEmail } = require('./emailTemplates.service');
 
-const expo = new Expo();
+// expo-server-sdk v6 ships as an ES Module ("type": "module"); require()-ing it crashes on
+// Vercel's Node runtime (ERR_REQUIRE_ESM), so it must be loaded via dynamic import() instead.
+let expoModulePromise = null;
+const getExpoModule = async () => {
+  if (!expoModulePromise) {
+    expoModulePromise = import('expo-server-sdk');
+  }
+  return expoModulePromise;
+};
 
 const STATUS_GROUP_MAP = {
   attente: 'soumis',
@@ -110,7 +117,9 @@ const approveUser = async (userId) => {
   }
 
   // Envoyer une notification push
+  const { Expo } = await getExpoModule();
   if (user.expoPushToken && Expo.isExpoPushToken(user.expoPushToken)) {
+    const expo = new Expo();
     const messages = [{
       to: user.expoPushToken,
       sound: 'default',
@@ -118,7 +127,7 @@ const approveUser = async (userId) => {
       body: 'Félicitations, votre compte professionnel a été validé.',
       data: { status: 'valide' },
     }];
-    
+
     const chunks = expo.chunkPushNotifications(messages);
     for (let chunk of chunks) {
       try {
@@ -184,7 +193,9 @@ const rejectUser = async (userId, { motifs, comment }) => {
   }
 
   // Envoyer une notification push
+  const { Expo } = await getExpoModule();
   if (user.expoPushToken && Expo.isExpoPushToken(user.expoPushToken)) {
+    const expo = new Expo();
     const messages = [{
       to: user.expoPushToken,
       sound: 'default',
@@ -252,7 +263,9 @@ const requestCorrection = async (userId, { motifs, comment }) => {
     console.error(`Erreur d'envoi du mail de correction : ${emailError.message}`);
   }
 
+  const { Expo } = await getExpoModule();
   if (user.expoPushToken && Expo.isExpoPushToken(user.expoPushToken)) {
+    const expo = new Expo();
     const messages = [{
       to: user.expoPushToken,
       sound: 'default',
