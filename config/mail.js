@@ -29,7 +29,7 @@ transporter.verify((error, success) => {
 const sendEmail = async ({ to, subject, text, html }) => {
   try {
     const mailOptions = {
-      from: `"DealsAutoPro" <${process.env.GMAIL_USER}>`,
+      from: `"DealAutoPro" <${process.env.GMAIL_USER}>`,
       to,
       subject,
       text,
