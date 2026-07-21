@@ -16,7 +16,7 @@ const protect = async (req, res, next) => {
   }
 
   try {
-    const jwtSecret = process.env.JWT_SECRET || 'dealsautopro_secret_jwt_key';
+    const jwtSecret = process.env.JWT_SECRET || 'dealautopro_secret_jwt_key';
     const decoded = jwt.verify(token, jwtSecret);
 
     // Récupérer l'utilisateur à partir du token en excluant le mot de passe

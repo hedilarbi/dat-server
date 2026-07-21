@@ -13,7 +13,7 @@ const seedAdmin = async () => {
         password: '12312312', // Sera haché automatiquement par le middleware pre-save
         firstName: 'System',
         lastName: 'Admin',
-        companyName: 'DealsAutoPro',
+        companyName: 'DealAutoPro',
         activityType: 'Administration',
         phone: '0000000000',
         role: 'admin',

@@ -32,6 +32,24 @@ const createAdminRegistrationNotification = async (user) => {
   });
 };
 
+const createAdminVehicleDossierNotification = async (dossier, seller) => {
+  const vehicleLabel = [dossier.brand, dossier.model].filter(Boolean).join(' ') || 'Véhicule';
+
+  return Notification.create({
+    recipientRole: 'admin',
+    type: 'vehicle_dossier_submitted',
+    title: 'Nouveau dossier véhicule soumis',
+    message: `${seller.companyName} a soumis un dossier véhicule (${vehicleLabel}) à valider.`,
+    createdByUser: seller._id,
+    metadata: {
+      dossierId: dossier._id.toString(),
+      sellerId: seller._id.toString(),
+      companyName: seller.companyName,
+      vehicleLabel
+    }
+  });
+};
+
 const markNotificationAsRead = async (notificationId) => {
   const notification = await Notification.findOneAndUpdate(
     { _id: notificationId, recipientRole: 'admin' },
@@ -60,6 +78,7 @@ const markAllAdminNotificationsAsRead = async () => {
 module.exports = {
   getAdminNotifications,
   createAdminRegistrationNotification,
+  createAdminVehicleDossierNotification,
   markNotificationAsRead,
   markAllAdminNotificationsAsRead
 };

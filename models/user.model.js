@@ -50,6 +50,10 @@ const userSchema = new mongoose.Schema({
     country: { type: String, trim: true },
     postalCode: { type: String, trim: true }
   },
+  kbisNumber: {
+    type: String,
+    trim: true
+  },
   // Documents téléversés sur Firebase Storage
   kbisUrl: {
     type: String,

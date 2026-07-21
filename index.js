@@ -19,6 +19,7 @@ connectDB().then(() => {
 const defaultAllowedOrigins = [
   'http://localhost:3000',
   'http://localhost:3001',
+  'http://localhost:3002',
   'http://localhost:19006',
   'http://localhost:8081',
   'http://localhost:8082',
@@ -55,26 +56,28 @@ app.use('/api/tickets', require('./routes/ticket.routes'));
 app.use('/api/admin', require('./routes/admin.routes'));
 app.use('/api/admin/messages', require('./routes/message.routes'));
 app.use('/api/upload', require('./routes/upload.routes'));
+app.use('/api/vehicle-dossiers', require('./routes/vehicleDossier.routes'));
+app.use('/api/admin/vehicle-dossiers', require('./routes/adminVehicleDossier.routes'));
 
 // Service de fichiers statiques (fallback local si nécessaire)
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Route de base de vérification de santé (health check)
 app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'ok', message: 'Le serveur DealsAutoPro fonctionne correctement.' });
+  res.status(200).json({ status: 'ok', message: 'Le serveur DealAutoPro fonctionne correctement.' });
 });
 
 // Middleware de gestion d'erreur global (doit être après les routes)
 app.use(errorHandler);
 
 // Démarrage du serveur
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 5001;
 const HOST = process.env.HOST || '0.0.0.0';
 app.listen(PORT, HOST, () => {
   const lanAddress = Object.values(os.networkInterfaces())
     .flat()
     .find(iface => iface && iface.family === 'IPv4' && !iface.internal)?.address;
-  console.log(`Serveur DealsAutoPro démarré sur http://${HOST}:${PORT}`);
+  console.log(`Serveur DealAutoPro démarré sur http://${HOST}:${PORT}`);
   if (lanAddress) {
     console.log(`URL mobile LAN : http://${lanAddress}:${PORT}`);
   }

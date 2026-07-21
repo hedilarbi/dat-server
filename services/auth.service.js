@@ -16,7 +16,7 @@ const generateOTP = () => {
  * @param {string} userId 
  */
 const generateToken = (userId) => {
-  const jwtSecret = process.env.JWT_SECRET || 'dealsautopro_secret_jwt_key';
+  const jwtSecret = process.env.JWT_SECRET || 'dealautopro_secret_jwt_key';
   return jwt.sign({ id: userId }, jwtSecret, {
     expiresIn: '30d', // Valide pendant 30 jours
   });
@@ -191,12 +191,18 @@ const registerStep2 = async (userId, profileData) => {
     throw err;
   }
 
-  const { firstName, lastName, companyName, activityType, phone, address, kbisUrl, cinRectoUrl, cinVersoUrl, vhuNumber, bankInfo } = profileData;
+  const { firstName, lastName, companyName, activityType, phone, address, kbisNumber, kbisUrl, cinRectoUrl, cinVersoUrl, vhuNumber, bankInfo } = profileData;
 
   // Validation des champs obligatoires pour l'étape 2
   if (!address || !address.street || !address.city || !address.country || !address.postalCode) {
     const err = new Error('L\'adresse complète est obligatoire.');
     err.codeName = 'auth.address_missing';
+    throw err;
+  }
+
+  if (!kbisNumber) {
+    const err = new Error('Le numéro de K-bis est obligatoire.');
+    err.codeName = 'auth.kbis_number_missing';
     throw err;
   }
 
@@ -239,6 +245,7 @@ const registerStep2 = async (userId, profileData) => {
 
   // Mettre à jour l'utilisateur
   user.address = address;
+  user.kbisNumber = kbisNumber;
   user.kbisUrl = kbisUrl;
   user.cinRectoUrl = cinRectoUrl;
   user.cinVersoUrl = cinVersoUrl;

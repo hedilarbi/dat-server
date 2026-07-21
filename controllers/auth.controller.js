@@ -97,7 +97,7 @@ const registerStep2 = async (req, res, next) => {
   try {
     // req.user est déjà défini par le middleware de protection d'authentification
     const userId = req.user._id;
-    const { firstName, lastName, companyName, activityType, phone, address, kbisUrl, cinRectoUrl, cinVersoUrl, vhuNumber, bankInfo } = req.body;
+    const { firstName, lastName, companyName, activityType, phone, address, kbisNumber, kbisUrl, cinRectoUrl, cinVersoUrl, vhuNumber, bankInfo } = req.body;
 
     const user = await authService.registerStep2(userId, {
       firstName,
@@ -106,6 +106,7 @@ const registerStep2 = async (req, res, next) => {
       activityType,
       phone,
       address,
+      kbisNumber,
       kbisUrl,
       cinRectoUrl,
       cinVersoUrl,
