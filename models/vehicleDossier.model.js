@@ -62,6 +62,8 @@ const vehicleDossierSchema = new mongoose.Schema({
   vin: { type: String, trim: true },
   description: { type: String, trim: true },
   vehicleCondition: { type: String, trim: true },
+  dossierType: { type: String, enum: ['Sinistré', 'VHU', 'Flotte', 'Occasion'], default: 'Sinistré' },
+  registrationNumber: { type: String, trim: true },
 
   // Étape 2 : images et documents
   photos: [photoSchema],
@@ -74,6 +76,13 @@ const vehicleDossierSchema = new mongoose.Schema({
 
   // Anticipé cahier des charges §6.11/10.21, non exploité dans ce lot
   listingCount: { type: Number, default: 0 },
+
+  // Session d'appel d'offres à laquelle ce véhicule est rattaché
+  session: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Session',
+    default: null
+  },
 
   // Cycle de vie du dossier avant mise en session (pattern identique à User.status). Les statuts
   // liés aux sessions/offres/paiements/OTP (cahier des charges §9) seront ajoutés par les tickets

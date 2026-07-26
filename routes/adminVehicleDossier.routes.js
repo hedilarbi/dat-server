@@ -7,6 +7,7 @@ const { adminOnly } = require('../middlewares/role.middleware');
 router.use(protect, adminOnly);
 
 router.get('/', adminVehicleDossierController.listDossiers);
+router.get('/available', adminVehicleDossierController.getAvailableDossiers);
 router.get('/:id', adminVehicleDossierController.getDossierById);
 router.put('/:id/media', adminVehicleDossierController.updateDossierMedia);
 router.post('/:id/validate', adminVehicleDossierController.approveDossier);

@@ -57,11 +57,21 @@ const requestCorrection = async (req, res, next) => {
   }
 };
 
+const getAvailableDossiers = async (req, res, next) => {
+  try {
+    const dossiers = await vehicleDossierService.adminGetAvailableDossiers();
+    res.status(200).json({ success: true, dossiers });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   listDossiers,
   getDossierById,
   updateDossierMedia,
   approveDossier,
   rejectDossier,
-  requestCorrection
+  requestCorrection,
+  getAvailableDossiers
 };

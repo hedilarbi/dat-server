@@ -51,7 +51,7 @@ const resolveReasonMessages = async (motifs, language) => {
 // (refusals), qui sont tous des champs du schéma mais réservés au serveur/à l'admin.
 const VEHICLE_FIELDS = [
   'brand', 'model', 'year', 'mileage', 'engine', 'fuelType', 'vin', 'description', 'vehicleCondition',
-  'reservePrice', 'conditionDetails'
+  'reservePrice', 'conditionDetails', 'dossierType', 'registrationNumber', 'session'
 ];
 
 const BLUR_ZONE_FIELDS = ['page', 'x', 'y', 'width', 'height'];
@@ -277,6 +277,13 @@ const adminGetDossierById = async (dossierId) => {
   return dossier;
 };
 
+const adminGetAvailableDossiers = async () => {
+  return VehicleDossier.find({ status: 'valide', session: null })
+    .populate('seller', 'companyName firstName lastName email')
+    .sort({ updatedAt: -1 })
+    .lean();
+};
+
 /**
  * Permet à l'administrateur de retoucher les médias (zones de flou, recadrage, réordonnancement,
  * couverture) indépendamment du statut du dossier — cahier des charges §10.5 ("Modifier une photo
@@ -400,5 +407,6 @@ module.exports = {
   adminUpdateDossierMedia,
   approveDossier,
   rejectDossier,
-  requestDossierCorrection
+  requestDossierCorrection,
+  adminGetAvailableDossiers
 };

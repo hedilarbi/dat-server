@@ -8,9 +8,19 @@ const { assertTrustedFileOrigin, basenameFromUrl, clamp } = require('./vehicleDo
 
 const MAX_PAGES = 15;
 const RENDER_SCALE = 2; // résolution suffisante pour lire/flouter un texte de rapport expert
-const STANDARD_FONT_DATA_URL = pathToFileURL(
-  path.join(path.dirname(require.resolve('pdfjs-dist/package.json')), 'standard_fonts') + '/'
-).href;
+
+let cachedStandardFontDataUrl = null;
+const getStandardFontDataUrl = () => {
+  if (cachedStandardFontDataUrl) return cachedStandardFontDataUrl;
+  try {
+    const pdfjsMain = require.resolve('pdfjs-dist');
+    const fontsDir = path.resolve(path.dirname(pdfjsMain), '../standard_fonts');
+    cachedStandardFontDataUrl = pathToFileURL(fontsDir + '/').href;
+  } catch (_err) {
+    cachedStandardFontDataUrl = 'https://unpkg.com/pdfjs-dist@4.10.38/standard_fonts/';
+  }
+  return cachedStandardFontDataUrl;
+};
 
 // pdfjs-dist "legacy" (build Node) n'est distribué qu'en ESM — require()-er ce module casserait
 // sur les versions de Node sans support de require(ESM). Chargé via import() dynamique mis en
@@ -38,7 +48,10 @@ const fetchPdfBuffer = async (pdfUrl, req) => {
 const loadPdf = async (buffer) => {
   const pdfjsLib = await getPdfjs();
   try {
-    const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(buffer), standardFontDataUrl: STANDARD_FONT_DATA_URL });
+    const loadingTask = pdfjsLib.getDocument({
+      data: new Uint8Array(buffer),
+      standardFontDataUrl: getStandardFontDataUrl(),
+    });
     const pdfDoc = await loadingTask.promise;
     if (pdfDoc.numPages > MAX_PAGES) {
       const error = new Error(`Ce document compte trop de pages (max ${MAX_PAGES} pour l'édition).`);

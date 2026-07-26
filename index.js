@@ -10,10 +10,24 @@ const { errorHandler } = require('./middlewares/error.middleware');
 // Initialisation de l'application Express
 const app = express();
 
+const sessionService = require('./services/session.service');
+
 // Connexion à la base de données
 connectDB().then(() => {
   // Seeding de l'administrateur par défaut après connexion réussie à la BDD
   seedAdmin();
+
+  // Initialiser et synchroniser automatiquement les sessions (ouvertes/clôturées)
+  sessionService.autoGenerateAndSyncSessions().catch((err) => {
+    console.error('Erreur initialisation des sessions:', err.message);
+  });
+
+  // Tâche de fond automatique toutes les 60 secondes
+  setInterval(() => {
+    sessionService.autoGenerateAndSyncSessions().catch((err) => {
+      console.error('Erreur synchronisation automatique des sessions:', err.message);
+    });
+  }, 60 * 1000);
 });
 
 const defaultAllowedOrigins = [
@@ -58,6 +72,7 @@ app.use('/api/admin/messages', require('./routes/message.routes'));
 app.use('/api/upload', require('./routes/upload.routes'));
 app.use('/api/vehicle-dossiers', require('./routes/vehicleDossier.routes'));
 app.use('/api/admin/vehicle-dossiers', require('./routes/adminVehicleDossier.routes'));
+app.use('/api/sessions', require('./routes/session.routes'));
 
 // Service de fichiers statiques (fallback local si nécessaire)
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
@@ -71,7 +86,7 @@ app.get('/health', (req, res) => {
 app.use(errorHandler);
 
 // Démarrage du serveur
-const PORT = process.env.PORT || 5001;
+const PORT = process.env.PORT || 5002;
 const HOST = process.env.HOST || '0.0.0.0';
 app.listen(PORT, HOST, () => {
   const lanAddress = Object.values(os.networkInterfaces())
