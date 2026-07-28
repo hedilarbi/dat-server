@@ -9,7 +9,7 @@ const notificationSchema = new mongoose.Schema({
   },
   type: {
     type: String,
-    enum: ['registration_submitted', 'vehicle_dossier_submitted', 'system'],
+    enum: ['registration_submitted', 'vehicle_dossier_submitted', 'ticket_created', 'system'],
     required: true,
     index: true
   },

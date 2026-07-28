@@ -50,6 +50,23 @@ const createAdminVehicleDossierNotification = async (dossier, seller) => {
   });
 };
 
+const createAdminTicketNotification = async (ticket, user) => {
+  return Notification.create({
+    recipientRole: 'admin',
+    type: 'ticket_created',
+    title: 'Nouvelle demande de support',
+    message: `${user.companyName} a ouvert une demande de support : "${ticket.title}".`,
+    createdByUser: user._id,
+    metadata: {
+      ticketId: ticket._id.toString(),
+      userId: user._id.toString(),
+      companyName: user.companyName,
+      category: ticket.category,
+      title: ticket.title
+    }
+  });
+};
+
 const markNotificationAsRead = async (notificationId) => {
   const notification = await Notification.findOneAndUpdate(
     { _id: notificationId, recipientRole: 'admin' },
@@ -79,6 +96,7 @@ module.exports = {
   getAdminNotifications,
   createAdminRegistrationNotification,
   createAdminVehicleDossierNotification,
+  createAdminTicketNotification,
   markNotificationAsRead,
   markAllAdminNotificationsAsRead
 };

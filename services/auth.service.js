@@ -1,8 +1,11 @@
 const User = require('../models/user.model');
 const jwt = require('jsonwebtoken');
+const { isValidPhoneNumber } = require('libphonenumber-js');
 const { sendEmail } = require('../config/mail');
 const { createAdminRegistrationNotification } = require('./notification.service');
 const { normalizeLanguage, otpEmail, passwordResetEmail } = require('./emailTemplates.service');
+
+const SIREN_REGEX = /^\d{9}$/;
 
 /**
  * Génère un code OTP à 6 chiffres
@@ -201,8 +204,20 @@ const registerStep2 = async (userId, profileData) => {
   }
 
   if (!kbisNumber) {
-    const err = new Error('Le numéro de K-bis est obligatoire.');
+    const err = new Error('Le numéro SIREN est obligatoire.');
     err.codeName = 'auth.kbis_number_missing';
+    throw err;
+  }
+
+  if (!SIREN_REGEX.test(kbisNumber.replace(/\s/g, ''))) {
+    const err = new Error('Le numéro SIREN doit contenir exactement 9 chiffres.');
+    err.codeName = 'auth.siren_invalid';
+    throw err;
+  }
+
+  if (phone && !isValidPhoneNumber(phone)) {
+    const err = new Error('Le format du numéro de téléphone est invalide.');
+    err.codeName = 'auth.phone_invalid';
     throw err;
   }
 

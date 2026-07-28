@@ -1,4 +1,5 @@
 const SUPPORTED_LANGUAGES = ['fr', 'en'];
+const CLIENT_BASE_URL = process.env.CLIENT_BASE_URL || 'https://dealautopro.com';
 
 const normalizeLanguage = (language) => {
   return SUPPORTED_LANGUAGES.includes(language) ? language : 'fr';
@@ -200,6 +201,8 @@ const rejectionEmail = ({ user, reasonsText, reasonsPlain, comment }) => {
 
 const correctionEmail = ({ user, reasonsText, reasonsPlain, comment }) => {
   const lang = normalizeLanguage(user.language);
+  const correctionPath = user.role === 'vendeur' ? '/vendeur/tableau-de-bord' : '/profil';
+  const correctionUrl = `${CLIENT_BASE_URL}${correctionPath}#correction-form`;
   const copy = {
     fr: {
       subject: 'Action requise : Correction de votre dossier - DealAutoPro',
@@ -208,9 +211,9 @@ const correctionEmail = ({ user, reasonsText, reasonsPlain, comment }) => {
       line1: "Après examen de vos documents professionnels, quelques éléments doivent être corrigés avant validation de votre inscription.",
       reasons: 'Éléments à corriger :',
       comment: "Commentaire de l'administrateur :",
-      line2: 'Merci de vous connecter sur votre espace et de mettre à jour votre dossier avec les éléments demandés.',
-      cta: 'Accéder à mon espace',
-      text: `Une correction est demandée sur votre dossier pour les raisons suivantes : ${reasonsPlain}. Commentaire : ${comment || ''}. Veuillez mettre à jour votre dossier sur votre espace.`,
+      line2: 'Merci de cliquer sur le lien ci-dessous pour corriger votre dossier avec les éléments demandés.',
+      cta: 'Corriger mon dossier',
+      text: `Une correction est demandée sur votre dossier pour les raisons suivantes : ${reasonsPlain}. Commentaire : ${comment || ''}. Corrigez votre dossier ici : ${correctionUrl}`,
       footer: "L'équipe DealAutoPro"
     },
     en: {
@@ -220,9 +223,9 @@ const correctionEmail = ({ user, reasonsText, reasonsPlain, comment }) => {
       line1: 'After reviewing your business documents, a few items need to be corrected before your registration can be approved.',
       reasons: 'Items to correct:',
       comment: 'Administrator comment:',
-      line2: 'Please sign in to your workspace and update your file with the requested items.',
-      cta: 'Open my workspace',
-      text: `A correction is requested on your file for the following reasons: ${reasonsPlain}. Comment: ${comment || ''}. Please update your file in your workspace.`,
+      line2: 'Please click the link below to fix your file with the requested items.',
+      cta: 'Fix my file',
+      text: `A correction is requested on your file for the following reasons: ${reasonsPlain}. Comment: ${comment || ''}. Fix your file here: ${correctionUrl}`,
       footer: 'The DealAutoPro team'
     }
   }[lang];
@@ -243,7 +246,7 @@ const correctionEmail = ({ user, reasonsText, reasonsPlain, comment }) => {
         </div>
         <p style="color: #5A5E66; font-size: 14px;">${copy.line2}</p>
         <div style="text-align: center; margin: 30px 0;">
-          <a href="https://dealautopro.com/login" style="background-color: #13243C; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold;">${copy.cta}</a>
+          <a href="${correctionUrl}" style="background-color: #13243C; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold;">${copy.cta}</a>
         </div>
       `
     })

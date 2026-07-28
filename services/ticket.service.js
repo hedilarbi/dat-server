@@ -1,4 +1,19 @@
 const Ticket = require('../models/ticket.model');
+const User = require('../models/user.model');
+const { createAdminTicketNotification } = require('./notification.service');
+
+/**
+ * Notifie l'administrateur (centre de notifications in-app) qu'un nouveau ticket a été créé.
+ * Échoue silencieusement pour ne jamais faire échouer la création du ticket.
+ */
+const notifyAdminOfNewTicket = async (ticket, userId) => {
+  try {
+    const user = await User.findById(userId).select('companyName');
+    if (user) await createAdminTicketNotification(ticket, user);
+  } catch (err) {
+    console.error(`Erreur lors de la notification admin (nouveau ticket support) : ${err.message}`);
+  }
+};
 
 /**
  * Créer un ticket de support avec son message initial
@@ -27,6 +42,7 @@ const createTicket = async (userId, userRole, ticketData) => {
   });
 
   await ticket.save();
+  await notifyAdminOfNewTicket(ticket, userId);
   return ticket;
 };
 
@@ -219,11 +235,32 @@ const addInternalNote = async (ticketId, adminId, noteContent) => {
   return getTicketById(ticketId, adminId, 'admin');
 };
 
+/**
+ * Supprimer un ticket (uniquement par son auteur)
+ */
+const deleteTicket = async (ticketId, userId, userRole) => {
+  const ticket = await Ticket.findById(ticketId);
+  if (!ticket) {
+    const err = new Error('Ticket introuvable.');
+    err.codeName = 'ticket.not_found';
+    throw err;
+  }
+
+  if (userRole !== 'admin' && ticket.user.toString() !== userId.toString()) {
+    const err = new Error('Accès refusé. Vous n\'êtes pas l\'auteur de ce ticket.');
+    err.codeName = 'ticket.access_forbidden';
+    throw err;
+  }
+
+  await ticket.deleteOne();
+};
+
 module.exports = {
   createTicket,
   getTickets,
   getTicketById,
   addMessageToTicket,
   updateTicketStatus,
-  addInternalNote
+  addInternalNote,
+  deleteTicket
 };

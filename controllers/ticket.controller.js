@@ -168,11 +168,32 @@ const addInternalNote = async (req, res, next) => {
   }
 };
 
+/**
+ * Supprimer un ticket (auteur uniquement)
+ */
+const deleteTicket = async (req, res, next) => {
+  try {
+    const ticketId = req.params.id;
+    const userId = req.user._id;
+    const userRole = req.user.role;
+
+    await ticketService.deleteTicket(ticketId, userId, userRole);
+
+    res.status(200).json({
+      success: true,
+      message: 'Ticket supprimé avec succès.'
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   createTicket,
   getTickets,
   getTicketById,
   addMessage,
   updateStatus,
-  addInternalNote
+  addInternalNote,
+  deleteTicket
 };

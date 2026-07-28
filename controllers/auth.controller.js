@@ -1,4 +1,7 @@
+const { isValidPhoneNumber } = require('libphonenumber-js');
 const authService = require('../services/auth.service');
+
+const SIREN_REGEX = /^\d{9}$/;
 
 const cookieOptions = {
   httpOnly: true,
@@ -18,6 +21,13 @@ const registerStep1 = async (req, res, next) => {
       return res.status(400).json({
         error: 'auth.validation_error',
         message: 'Tous les champs obligatoires doivent être renseignés.'
+      });
+    }
+
+    if (!isValidPhoneNumber(phone)) {
+      return res.status(400).json({
+        error: 'auth.validation_error',
+        message: 'Le format du numéro de téléphone est invalide.'
       });
     }
 
