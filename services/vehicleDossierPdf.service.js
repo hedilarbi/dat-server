@@ -184,7 +184,9 @@ const applyPdfBlur = async (pdfUrl, pagesZones, req) => {
     outPage.drawImage(embeddedImage, { x: 0, y: 0, width, height });
   }
 
-  const outBytes = await outPdf.save();
+  // Sans object streams, le PDF est un peu plus volumineux mais reste lisible par davantage de
+  // moteurs intégrés (aperçus WebView/iOS, anciens lecteurs et certaines previews navigateur).
+  const outBytes = await outPdf.save({ useObjectStreams: false });
   const basename = basenameFromUrl(pdfUrl).replace(/\.pdf$/i, '') + '.pdf';
   const filename = `vehicules/blurred/${Date.now()}_${basename}`;
 
