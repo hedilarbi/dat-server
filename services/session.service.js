@@ -47,10 +47,25 @@ const syncSessionStatuses = async () => {
   const now = new Date();
   const sessions = await Session.find({ status: { $ne: 'annulee' } });
 
-  for (const session of sessions) {
+  for (const [index, session] of sessions.entries()) {
     let newStatus = session.status;
     const start = new Date(session.startDate || session.date);
-    const end = new Date(session.endDate || (start.getTime() + (session.durationHours || 48) * 3600 * 1000));
+    if (Number.isNaN(start.getTime())) {
+      console.warn(`Session ${session._id} ignorée : aucune date de début valide.`);
+      continue;
+    }
+
+    const end = new Date(
+      session.endDate || (start.getTime() + (session.durationHours || 48) * 3600 * 1000)
+    );
+
+    // Normaliser les anciennes sessions qui ne possédaient que le champ `date`.
+    // Sans cette migration, la mise à jour du statut échoue car les champs actuels
+    // name, startDate et endDate sont obligatoires dans le modèle.
+    if (!session.name) session.name = `Session #${index + 1}`;
+    if (!session.startDate) session.startDate = start;
+    if (!session.endDate) session.endDate = end;
+    if (!session.date) session.date = start;
 
     if (now > end) {
       newStatus = 'closed';
@@ -60,8 +75,9 @@ const syncSessionStatuses = async () => {
       newStatus = 'upcoming';
     }
 
-    if (session.status !== newStatus) {
-      session.status = newStatus;
+    if (session.status !== newStatus) session.status = newStatus;
+
+    if (session.isModified()) {
       await session.save();
     }
   }

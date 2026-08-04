@@ -18,11 +18,10 @@ const sessionSchema = new mongoose.Schema({
 });
 
 // Middleware pre-save pour synchroniser date et status
-sessionSchema.pre('save', function (next) {
+sessionSchema.pre('save', function () {
   if (this.startDate && !this.date) {
     this.date = this.startDate;
   }
-  next();
 });
 
 const Session = mongoose.model('Session', sessionSchema);

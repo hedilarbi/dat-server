@@ -47,6 +47,31 @@ const deleteDossier = async (req, res, next) => {
   }
 };
 
+const lookupRegistration = async (req, res, next) => {
+  try {
+    const immatriculation = String(req.body.immatriculation || '').trim().toUpperCase();
+    if (!immatriculation) {
+      const error = new Error("Le numéro d'immatriculation est requis.");
+      error.statusCode = 400;
+      throw error;
+    }
+    const url = new URL('https://api.apiplaqueimmatriculation.com/plaque');
+    url.searchParams.set('immatriculation', immatriculation);
+    url.searchParams.set('token', process.env.API_PLAQUE_TOKEN || 'TokenDemo2026B');
+    url.searchParams.set('pays', 'FR');
+    const response = await fetch(url, { method: 'POST' });
+    const payload = await response.json();
+    if (!response.ok || payload?.data?.erreur) {
+      const error = new Error(payload?.data?.erreur || 'Immatriculation introuvable.');
+      error.statusCode = response.ok ? 404 : response.status;
+      throw error;
+    }
+    res.status(200).json({ success: true, data: payload.data });
+  } catch (error) {
+    next(error);
+  }
+};
+
 const blurMedia = async (req, res, next) => {
   try {
     const { imageUrl, zones } = req.body;
@@ -83,6 +108,7 @@ module.exports = {
   listDossiers,
   getDossierById,
   deleteDossier,
+  lookupRegistration,
   blurMedia,
   getPdfPages,
   blurPdf

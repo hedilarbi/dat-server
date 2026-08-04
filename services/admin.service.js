@@ -56,6 +56,10 @@ const getUsers = async (filters = {}) => {
   const finalQuery = conditions.length > 1 ? { $and: conditions } : query;
 
   const baseQuery = { role: { $ne: 'admin' } };
+  // Les compteurs de statut (en attente/correction/validé/refusé) suivent le filtre de rôle
+  // en cours, pour que /inscriptions/acheteur et /inscriptions/vendeur affichent chacune
+  // leurs propres totaux plutôt que ceux des deux rôles combinés.
+  const roleScopedQuery = role && role !== 'all' ? { ...baseQuery, role } : baseQuery;
   const [users, total, counts] = await Promise.all([
     User.find(finalQuery)
       .select('-password')
@@ -67,10 +71,10 @@ const getUsers = async (filters = {}) => {
       User.countDocuments(baseQuery),
       User.countDocuments({ ...baseQuery, role: 'acheteur' }),
       User.countDocuments({ ...baseQuery, role: 'vendeur' }),
-      User.countDocuments({ ...baseQuery, status: STATUS_GROUP_MAP.attente }),
-      User.countDocuments({ ...baseQuery, status: STATUS_GROUP_MAP.correction }),
-      User.countDocuments({ ...baseQuery, status: STATUS_GROUP_MAP.valide }),
-      User.countDocuments({ ...baseQuery, status: STATUS_GROUP_MAP.refuse }),
+      User.countDocuments({ ...roleScopedQuery, status: STATUS_GROUP_MAP.attente }),
+      User.countDocuments({ ...roleScopedQuery, status: STATUS_GROUP_MAP.correction }),
+      User.countDocuments({ ...roleScopedQuery, status: STATUS_GROUP_MAP.valide }),
+      User.countDocuments({ ...roleScopedQuery, status: STATUS_GROUP_MAP.refuse }),
     ]).then(([totalAll, acheteur, vendeur, enAttente, correction, valide, refuse]) => ({
       all: totalAll,
       acheteur,

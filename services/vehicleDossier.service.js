@@ -51,7 +51,11 @@ const resolveReasonMessages = async (motifs, language) => {
 // (refusals), qui sont tous des champs du schéma mais réservés au serveur/à l'admin.
 const VEHICLE_FIELDS = [
   'brand', 'model', 'year', 'mileage', 'engine', 'fuelType', 'vin', 'description', 'vehicleCondition',
-  'reservePrice', 'conditionDetails', 'dossierType', 'registrationNumber', 'session'
+  'reservePrice', 'conditionDetails', 'dossierType', 'registrationNumber', 'session',
+  'registrationCountry', 'firstRegistrationDate', 'co2', 'energyLabel', 'vehicleGenre',
+  'fiscalPower', 'bodyType', 'gearbox', 'passengerCount', 'doorCount', 'color', 'vrade',
+  'procedure', 'vehicleAddress', 'registrationCardAvailable', 'registrationCardMissingReasons',
+  'identificationSheetAvailable', 'policeBookNumber'
 ];
 
 const BLUR_ZONE_FIELDS = ['page', 'x', 'y', 'width', 'height'];
@@ -94,7 +98,7 @@ const pickEditableFields = (payload) => {
     if (payload[field] !== undefined) result[field] = payload[field];
   }
   if (payload.photos !== undefined) {
-    result.photos = (payload.photos || []).map(pickPhoto);
+    result.photos = (payload.photos || []).map((photo, index) => ({ ...pickPhoto(photo), isCover: index === 0 }));
   }
   if (payload.expertReport !== undefined) {
     result.expertReport = payload.expertReport ? pickDocument(payload.expertReport) : undefined;
@@ -123,10 +127,6 @@ const assertSubmittable = (dossier) => {
     missing.push('photos');
   } else if (dossier.photos.filter((p) => p.isCover).length !== 1) {
     missing.push('coverPhoto');
-  }
-
-  if (!dossier.expertReport || !dossier.expertReport.originalUrl) {
-    missing.push('expertReport');
   }
 
   if (missing.length > 0) {
