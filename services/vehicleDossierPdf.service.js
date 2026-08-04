@@ -1,6 +1,6 @@
 const sharp = require('sharp');
 const { PDFDocument } = require('pdf-lib');
-const { createCanvas } = require('@napi-rs/canvas');
+const { createCanvas, DOMMatrix, ImageData, Path2D } = require('@napi-rs/canvas');
 const path = require('path');
 const { pathToFileURL } = require('url');
 const { saveBuffer } = require('./storage.service');
@@ -28,6 +28,15 @@ const getStandardFontDataUrl = () => {
 let pdfjsModulePromise = null;
 const getPdfjs = async () => {
   if (!pdfjsModulePromise) {
+    // pdfjs-dist utilise ces API DOM dès l'import du module, avant même l'ouverture d'un PDF.
+    // Elles n'existent pas dans Node ; @napi-rs/canvas fournit les implémentations natives
+    // compatibles utilisées ensuite pour le rendu des pages.
+    globalThis.DOMMatrix ??= DOMMatrix;
+    globalThis.ImageData ??= ImageData;
+    globalThis.Path2D ??= Path2D;
+    // pdfjs-dist 6 appelle l'API Node 22 `process.getBuiltinModule`. Les environnements encore
+    // en Node 20/21 peuvent fournir le même comportement via require pour les modules natifs.
+    process.getBuiltinModule ??= require;
     pdfjsModulePromise = import('pdfjs-dist/legacy/build/pdf.mjs');
   }
   return pdfjsModulePromise;
