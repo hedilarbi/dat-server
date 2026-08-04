@@ -32,6 +32,18 @@ const sendPushNotification = async (user, { title, body, data }) => {
 
 const vehicleLabelOf = (dossier) => [dossier.brand, dossier.model].filter(Boolean).join(' ') || 'Véhicule';
 
+const sendDecisionEmail = async (seller, emailContent) => {
+  try {
+    return await sendEmail({ to: seller.email, ...emailContent });
+  } catch (cause) {
+    const error = new Error(`L'e-mail n'a pas pu être envoyé à ${seller.email || 'ce vendeur'}. La décision n'a pas été appliquée : vérifiez la configuration SMTP puis réessayez.`);
+    error.statusCode = 502;
+    error.codeName = 'vehicleDossier.email_delivery_failed';
+    error.cause = cause;
+    throw error;
+  }
+};
+
 /**
  * Résout les clés de motifs (RefusalReason) en libellés lisibles dans la langue du destinataire.
  * Mêmes conventions que admin.service.js::rejectUser (motifsLabels = libellés résolus et figés
@@ -50,11 +62,11 @@ const resolveReasonMessages = async (motifs, language) => {
 // (status), de changer de propriétaire (seller) ou d'écrire dans l'historique de refus
 // (refusals), qui sont tous des champs du schéma mais réservés au serveur/à l'admin.
 const VEHICLE_FIELDS = [
-  'brand', 'model', 'year', 'mileage', 'engine', 'fuelType', 'vin', 'description', 'vehicleCondition',
-  'reservePrice', 'conditionDetails', 'dossierType', 'registrationNumber', 'session',
+  'brand', 'model', 'year', 'mileage', 'engine', 'fuelType', 'vin', 'description',
+  'reservePrice', 'conditionDetails', 'registrationNumber', 'session',
   'registrationCountry', 'firstRegistrationDate', 'co2', 'energyLabel', 'vehicleGenre',
   'fiscalPower', 'bodyType', 'gearbox', 'passengerCount', 'doorCount', 'color', 'vrade',
-  'procedure', 'vehicleAddress', 'registrationCardAvailable', 'registrationCardMissingReasons',
+  'procedure', 'vehicleAddress', 'vehicleAddressDetails', 'registrationCardAvailable', 'registrationCardMissingReasons',
   'identificationSheetAvailable', 'policeBookNumber'
 ];
 
@@ -116,7 +128,7 @@ const pickEditableFields = (payload) => {
 const assertSubmittable = (dossier) => {
   const missing = [];
 
-  const requiredFields = ['brand', 'model', 'year', 'mileage', 'engine', 'fuelType', 'vin', 'description', 'vehicleCondition', 'reservePrice'];
+  const requiredFields = ['brand', 'model', 'year', 'mileage', 'engine', 'fuelType', 'vin', 'description', 'reservePrice'];
   for (const field of requiredFields) {
     if (dossier[field] === undefined || dossier[field] === null || dossier[field] === '') {
       missing.push(field);
@@ -311,16 +323,12 @@ const adminUpdateDossierMedia = async (dossierId, payload) => {
 
 const approveDossier = async (dossierId) => {
   const dossier = await adminGetDossierById(dossierId);
-  dossier.status = 'valide';
-  await dossier.save();
-
   const seller = dossier.seller;
   const vehicleLabel = vehicleLabelOf(dossier);
-  try {
-    await sendEmail({ to: seller.email, ...dossierApprovalEmail({ user: seller, vehicleLabel }) });
-  } catch (emailError) {
-    console.error(`Erreur d'envoi du mail de validation de dossier : ${emailError.message}`);
-  }
+  await sendDecisionEmail(seller, dossierApprovalEmail({ user: seller, vehicleLabel }));
+
+  dossier.status = 'valide';
+  await dossier.save();
   await sendPushNotification(seller, {
     title: 'Dossier véhicule validé !',
     body: `Votre dossier "${vehicleLabel}" a été validé.`,
@@ -342,18 +350,14 @@ const rejectDossier = async (dossierId, { motifs, comment }) => {
   const seller = dossier.seller;
   const reasonMessages = await resolveReasonMessages(motifs, seller.language);
 
-  dossier.status = 'refuse';
-  dossier.refusals.push({ date: new Date(), motifs, motifsLabels: reasonMessages, comment: comment || '' });
-  await dossier.save();
-
   const vehicleLabel = vehicleLabelOf(dossier);
   const reasonsText = reasonMessages.map((text) => `- ${text}`).join('<br>');
   const reasonsPlain = reasonMessages.join(', ');
-  try {
-    await sendEmail({ to: seller.email, ...dossierRejectionEmail({ user: seller, vehicleLabel, reasonsText, reasonsPlain, comment }) });
-  } catch (emailError) {
-    console.error(`Erreur d'envoi du mail de refus de dossier : ${emailError.message}`);
-  }
+  await sendDecisionEmail(seller, dossierRejectionEmail({ user: seller, vehicleLabel, reasonsText, reasonsPlain, comment }));
+
+  dossier.status = 'refuse';
+  dossier.refusals.push({ date: new Date(), motifs, motifsLabels: reasonMessages, comment: comment || '' });
+  await dossier.save();
   await sendPushNotification(seller, {
     title: 'Dossier véhicule refusé',
     body: `Votre dossier "${vehicleLabel}" a été refusé. Consultez votre espace pour plus de détails.`,
@@ -375,18 +379,14 @@ const requestDossierCorrection = async (dossierId, { motifs, comment }) => {
   const seller = dossier.seller;
   const reasonMessages = await resolveReasonMessages(motifs, seller.language);
 
-  dossier.status = 'correction_demandee';
-  dossier.refusals.push({ date: new Date(), motifs, motifsLabels: reasonMessages, comment: comment || '' });
-  await dossier.save();
-
   const vehicleLabel = vehicleLabelOf(dossier);
   const reasonsText = reasonMessages.map((text) => `- ${text}`).join('<br>');
   const reasonsPlain = reasonMessages.join(', ');
-  try {
-    await sendEmail({ to: seller.email, ...dossierCorrectionEmail({ user: seller, vehicleLabel, reasonsText, reasonsPlain, comment }) });
-  } catch (emailError) {
-    console.error(`Erreur d'envoi du mail de correction de dossier : ${emailError.message}`);
-  }
+  await sendDecisionEmail(seller, dossierCorrectionEmail({ user: seller, vehicleLabel, reasonsText, reasonsPlain, comment }));
+
+  dossier.status = 'correction_demandee';
+  dossier.refusals.push({ date: new Date(), motifs, motifsLabels: reasonMessages, comment: comment || '' });
+  await dossier.save();
   await sendPushNotification(seller, {
     title: 'Correction demandée sur votre dossier véhicule',
     body: `Veuillez mettre à jour le dossier "${vehicleLabel}" dans votre espace.`,

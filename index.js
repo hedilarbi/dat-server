@@ -5,6 +5,7 @@ const cookieParser = require('cookie-parser');
 const os = require('os');
 const connectDB = require('./config/db');
 const seedAdmin = require('./utils/seedAdmin');
+const migrateLegacyVehicleDossierFields = require('./utils/migrateLegacyVehicleDossierFields');
 const { errorHandler } = require('./middlewares/error.middleware');
 
 // Initialisation de l'application Express
@@ -14,6 +15,10 @@ const sessionService = require('./services/session.service');
 
 // Connexion à la base de données
 connectDB().then(() => {
+  migrateLegacyVehicleDossierFields().catch((err) => {
+    console.error('Erreur migration des dossiers véhicules :', err.message);
+  });
+
   // Seeding de l'administrateur par défaut après connexion réussie à la BDD
   seedAdmin();
 
@@ -73,6 +78,7 @@ app.use('/api/upload', require('./routes/upload.routes'));
 app.use('/api/vehicle-dossiers', require('./routes/vehicleDossier.routes'));
 app.use('/api/admin/vehicle-dossiers', require('./routes/adminVehicleDossier.routes'));
 app.use('/api/sessions', require('./routes/session.routes'));
+app.use('/api/public', require('./routes/publicSales.routes'));
 
 // Service de fichiers statiques (fallback local si nécessaire)
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));

@@ -55,12 +55,19 @@ const lookupRegistration = async (req, res, next) => {
       error.statusCode = 400;
       throw error;
     }
+    const token = process.env.API_MATRICULE_TOKEN;
+    if (!token) {
+      const error = new Error("Le service de recherche d'immatriculation n'est pas configuré.");
+      error.statusCode = 503;
+      throw error;
+    }
     const url = new URL('https://api.apiplaqueimmatriculation.com/plaque');
     url.searchParams.set('immatriculation', immatriculation);
-    url.searchParams.set('token', process.env.API_PLAQUE_TOKEN || 'TokenDemo2026B');
+    url.searchParams.set('token', token);
     url.searchParams.set('pays', 'FR');
     const response = await fetch(url, { method: 'POST' });
     const payload = await response.json();
+
     if (!response.ok || payload?.data?.erreur) {
       const error = new Error(payload?.data?.erreur || 'Immatriculation introuvable.');
       error.statusCode = response.ok ? 404 : response.status;
