@@ -13,8 +13,8 @@ let cachedStandardFontDataUrl = null;
 const getStandardFontDataUrl = () => {
   if (cachedStandardFontDataUrl) return cachedStandardFontDataUrl;
   try {
-    const pdfjsMain = require.resolve('pdfjs-dist');
-    const fontsDir = path.resolve(path.dirname(pdfjsMain), '../standard_fonts');
+    const pdfjsPackage = require.resolve('pdfjs-dist/package.json');
+    const fontsDir = path.resolve(path.dirname(pdfjsPackage), 'standard_fonts');
     cachedStandardFontDataUrl = pathToFileURL(fontsDir + '/').href;
   } catch (_err) {
     cachedStandardFontDataUrl = 'https://unpkg.com/pdfjs-dist@4.10.38/standard_fonts/';
@@ -37,7 +37,15 @@ const getPdfjs = async () => {
     // pdfjs-dist 6 appelle l'API Node 22 `process.getBuiltinModule`. Les environnements encore
     // en Node 20/21 peuvent fournir le même comportement via require pour les modules natifs.
     process.getBuiltinModule ??= require;
-    pdfjsModulePromise = import('pdfjs-dist/legacy/build/pdf.mjs');
+    pdfjsModulePromise = import('pdfjs-dist/legacy/build/pdf.mjs').then((pdfjsLib) => {
+      // En environnement serverless, le worker chargé via import dynamique n'est pas toujours
+      // détecté par le traçage du bundle. Une URL absolue évite aussi que "./pdf.worker.mjs" soit
+      // résolu relativement à /var/task/services au lieu du package pdfjs-dist.
+      pdfjsLib.GlobalWorkerOptions.workerSrc = pathToFileURL(
+        require.resolve('pdfjs-dist/legacy/build/pdf.worker.mjs')
+      ).href;
+      return pdfjsLib;
+    });
   }
   return pdfjsModulePromise;
 };
@@ -71,9 +79,20 @@ const loadPdf = async (buffer) => {
     return pdfDoc;
   } catch (err) {
     if (err.codeName) throw err;
-    const error = new Error('Ce document PDF est illisible ou corrompu.');
-    error.statusCode = 400;
-    error.codeName = 'vehicleDossier.blur_unsupported_format';
+    console.error('Échec du chargement PDF par pdfjs:', {
+      name: err.name,
+      message: err.message,
+      stack: err.stack,
+      pdfBytes: buffer.length,
+      pdfHeader: buffer.subarray(0, 8).toString('ascii'),
+    });
+    const invalidPdf = ['InvalidPDFException', 'MissingPDFException', 'PasswordException'].includes(err.name);
+    const error = new Error(invalidPdf
+      ? 'Ce document PDF est illisible, protégé par mot de passe ou corrompu.'
+      : "Le service de lecture PDF n'a pas pu initialiser le document. Veuillez réessayer.");
+    error.statusCode = invalidPdf ? 400 : 500;
+    error.codeName = invalidPdf ? 'vehicleDossier.blur_unsupported_format' : 'vehicleDossier.pdf_processing_failed';
+    error.cause = err;
     throw error;
   }
 };
