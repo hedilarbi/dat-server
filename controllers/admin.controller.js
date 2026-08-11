@@ -3,8 +3,8 @@ const notificationService = require('../services/notification.service');
 
 const getUsers = async (req, res, next) => {
   try {
-    const { role, status, search, page, limit } = req.query;
-    const result = await adminService.getUsers({ role, status, search, page, limit });
+    const { role, status, search, city, dateFrom, dateTo, page, limit } = req.query;
+    const result = await adminService.getUsers({ role, status, search, city, dateFrom, dateTo, page, limit });
     res.status(200).json({ success: true, ...result });
   } catch (error) {
     next(error);

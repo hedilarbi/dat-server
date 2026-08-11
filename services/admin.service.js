@@ -26,13 +26,19 @@ const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
  * Récupérer la liste des utilisateurs (avec filtres de rôle, statut, recherche et pagination)
  */
 const getUsers = async (filters = {}) => {
-  const { role, status, search } = filters;
+  const { role, status, search, city, dateFrom, dateTo } = filters;
   const page = Math.max(1, parseInt(filters.page, 10) || 1);
   const limit = Math.max(1, Math.min(100, parseInt(filters.limit, 10) || 20));
 
   const query = { role: { $ne: 'admin' } };
   if (role && role !== 'all') query.role = role;
   if (status && status !== 'all') query.status = STATUS_GROUP_MAP[status] || status;
+  if (city) query['address.city'] = new RegExp(escapeRegExp(city), 'i');
+  if (dateFrom || dateTo) {
+    query.createdAt = {};
+    if (dateFrom) query.createdAt.$gte = new Date(`${dateFrom}T00:00:00.000Z`);
+    if (dateTo) query.createdAt.$lte = new Date(`${dateTo}T23:59:59.999Z`);
+  }
 
   const conditions = [query];
   if (search) {
@@ -60,6 +66,9 @@ const getUsers = async (filters = {}) => {
   // en cours, pour que /inscriptions/acheteur et /inscriptions/vendeur affichent chacune
   // leurs propres totaux plutôt que ceux des deux rôles combinés.
   const roleScopedQuery = role && role !== 'all' ? { ...baseQuery, role } : baseQuery;
+  const monthStart = new Date();
+  monthStart.setUTCDate(1);
+  monthStart.setUTCHours(0, 0, 0, 0);
   const [users, total, counts] = await Promise.all([
     User.find(finalQuery)
       .select('-password')
@@ -75,7 +84,9 @@ const getUsers = async (filters = {}) => {
       User.countDocuments({ ...roleScopedQuery, status: STATUS_GROUP_MAP.correction }),
       User.countDocuments({ ...roleScopedQuery, status: STATUS_GROUP_MAP.valide }),
       User.countDocuments({ ...roleScopedQuery, status: STATUS_GROUP_MAP.refuse }),
-    ]).then(([totalAll, acheteur, vendeur, enAttente, correction, valide, refuse]) => ({
+      User.countDocuments(roleScopedQuery),
+      User.countDocuments({ ...roleScopedQuery, createdAt: { $gte: monthStart } }),
+    ]).then(([totalAll, acheteur, vendeur, enAttente, correction, valide, refuse, roleTotal, newThisMonth]) => ({
       all: totalAll,
       acheteur,
       vendeur,
@@ -83,6 +94,8 @@ const getUsers = async (filters = {}) => {
       correction,
       valide,
       refuse,
+      roleTotal,
+      newThisMonth,
     })),
   ]);
 
