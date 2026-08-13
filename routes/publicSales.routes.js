@@ -19,7 +19,7 @@ router.get('/current-sales', async (_req, res) => {
     const sessionIds = sessions.map((session) => session._id);
     const dossiers = sessionIds.length
       ? await VehicleDossier.find({ status: 'valide', session: { $in: sessionIds } })
-          .select('brand model year mileage fuelType bodyType photos session')
+          .select('brand model year mileage fuelType energyLabel procedure gearbox bodyType photos session')
           .sort({ updatedAt: -1 })
           .lean()
       : [];
@@ -36,6 +36,9 @@ router.get('/current-sales', async (_req, res) => {
         year: dossier.year ?? null,
         mileage: dossier.mileage ?? null,
         fuelType: dossier.fuelType || '',
+        energyLabel: dossier.energyLabel || '',
+        procedure: dossier.procedure || '',
+        gearbox: dossier.gearbox || '',
         bodyType: dossier.bodyType || '',
         photoUrl: coverPhoto?.processedUrl || coverPhoto?.originalUrl || null,
         session: session ? {

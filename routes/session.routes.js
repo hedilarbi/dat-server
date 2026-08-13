@@ -80,6 +80,24 @@ router.post('/', protect, adminOnly, async (req, res) => {
   }
 });
 
+// PUT /api/sessions/:id - Modifier les informations éditables d'une session
+router.put('/:id', protect, adminOnly, async (req, res) => {
+  try {
+    const name = typeof req.body.name === 'string' ? req.body.name.trim() : '';
+    if (!name) {
+      return res.status(400).json({ message: 'Le nom de la session est requis.' });
+    }
+    const session = await Session.findByIdAndUpdate(req.params.id, { $set: { name } }, { new: true, runValidators: true });
+    if (!session) {
+      return res.status(404).json({ message: 'Session introuvable.' });
+    }
+    res.json({ message: 'Nom de la session mis à jour.', session });
+  } catch (error) {
+    console.error('Erreur PUT /sessions/:id:', error);
+    res.status(500).json({ message: 'Erreur lors de la modification de la session.' });
+  }
+});
+
 // GET /api/sessions/:id - Détails d'une session avec ses véhicules
 router.get('/:id', protect, adminOnly, async (req, res) => {
   try {
@@ -161,7 +179,10 @@ router.delete('/:id', protect, adminOnly, async (req, res) => {
     }
 
     // Libérer les véhicules associés
-    await VehicleDossier.updateMany({ session: session._id.toString() }, { $set: { session: null } });
+    await VehicleDossier.updateMany(
+      { $or: [{ session: session._id.toString() }, { session: session._id }] },
+      { $set: { session: null } }
+    );
     await session.deleteOne();
 
     res.json({ message: 'Session supprimée et véhicules libérés.' });

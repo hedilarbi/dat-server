@@ -2,8 +2,8 @@ const vehicleDossierService = require('../services/vehicleDossier.service');
 
 const listDossiers = async (req, res, next) => {
   try {
-    const { status, search, page, limit } = req.query;
-    const result = await vehicleDossierService.adminListDossiers({ status, search, page, limit });
+    const { status, columnFilters, page, limit } = req.query;
+    const result = await vehicleDossierService.adminListDossiers({ status, columnFilters, page, limit });
     res.status(200).json({ success: true, ...result });
   } catch (error) {
     next(error);

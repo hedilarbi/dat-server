@@ -252,9 +252,33 @@ const adminListDossiers = async (filters = {}) => {
   const query = {};
   if (filters.status && filters.status !== 'all') query.status = filters.status;
 
-  if (filters.search) {
-    const regex = new RegExp(escapeRegExp(filters.search), 'i');
-    query.$or = [{ brand: regex }, { model: regex }, { vin: regex }];
+  let columnFilters = {};
+  if (filters.columnFilters) {
+    try {
+      columnFilters = typeof filters.columnFilters === 'string' ? JSON.parse(filters.columnFilters) : filters.columnFilters;
+    } catch {
+      columnFilters = {};
+    }
+  }
+
+  const textFields = ['brand', 'model', 'registrationNumber', 'procedure', 'co2', 'energyLabel', 'vehicleGenre', 'fiscalPower', 'bodyType', 'vin', 'gearbox', 'color', 'vrade'];
+  textFields.forEach((field) => {
+    if (columnFilters[field]) query[field] = new RegExp(escapeRegExp(String(columnFilters[field])), 'i');
+  });
+  if (columnFilters.year && Number.isFinite(Number(columnFilters.year))) query.year = Number(columnFilters.year);
+  if (columnFilters.mileage && Number.isFinite(Number(columnFilters.mileage))) query.mileage = Number(columnFilters.mileage);
+  if (columnFilters.registrationCardAvailable === 'true') query.registrationCardAvailable = true;
+  if (columnFilters.registrationCardAvailable === 'false') query.registrationCardAvailable = false;
+  if (columnFilters.status) query.status = columnFilters.status;
+  if (columnFilters.submittedAt) {
+    const start = new Date(`${columnFilters.submittedAt}T00:00:00.000Z`);
+    const end = new Date(`${columnFilters.submittedAt}T23:59:59.999Z`);
+    if (!Number.isNaN(start.getTime())) query.submittedAt = { $gte: start, $lte: end };
+  }
+  if (columnFilters.seller) {
+    const sellerRegex = new RegExp(escapeRegExp(String(columnFilters.seller)), 'i');
+    const sellerIds = await User.find({ $or: [{ companyName: sellerRegex }, { firstName: sellerRegex }, { lastName: sellerRegex }] }).distinct('_id');
+    query.seller = { $in: sellerIds };
   }
 
   const page = Math.max(1, parseInt(filters.page, 10) || 1);
