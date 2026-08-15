@@ -19,6 +19,15 @@ const getDossierById = async (req, res, next) => {
   }
 };
 
+const updateDossier = async (req, res, next) => {
+  try {
+    const dossier = await vehicleDossierService.adminUpdateDossier(req.params.id, req.body);
+    res.status(200).json({ success: true, message: 'Dossier véhicule mis à jour.', dossier });
+  } catch (error) {
+    next(error);
+  }
+};
+
 const updateDossierMedia = async (req, res, next) => {
   try {
     const dossier = await vehicleDossierService.adminUpdateDossierMedia(req.params.id, req.body);
@@ -69,6 +78,7 @@ const getAvailableDossiers = async (req, res, next) => {
 module.exports = {
   listDossiers,
   getDossierById,
+  updateDossier,
   updateDossierMedia,
   approveDossier,
   rejectDossier,

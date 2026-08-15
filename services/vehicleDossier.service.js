@@ -313,6 +313,25 @@ const adminGetDossierById = async (dossierId) => {
   return dossier;
 };
 
+const adminUpdateDossier = async (dossierId, payload) => {
+  const dossier = await VehicleDossier.findById(dossierId);
+  if (!dossier) {
+    const error = new Error('Dossier véhicule introuvable.');
+    error.statusCode = 404;
+    error.codeName = 'vehicleDossier.not_found';
+    throw error;
+  }
+  const editableFields = pickEditableFields(payload || {});
+  // Les médias disposent de leur propre éditeur et ne sont pas remplacés par ce formulaire.
+  delete editableFields.photos;
+  delete editableFields.expertReport;
+  delete editableFields.additionalDocuments;
+  Object.assign(dossier, editableFields);
+  await dossier.save();
+  await dossier.populate('seller', 'companyName email firstName lastName phone language expoPushToken');
+  return dossier;
+};
+
 const adminGetAvailableDossiers = async () => {
   return VehicleDossier.find({ status: 'valide', session: null })
     .populate('seller', 'companyName firstName lastName email')
@@ -428,6 +447,7 @@ module.exports = {
   deleteDossier,
   adminListDossiers,
   adminGetDossierById,
+  adminUpdateDossier,
   adminUpdateDossierMedia,
   approveDossier,
   rejectDossier,
