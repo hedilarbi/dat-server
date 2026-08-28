@@ -31,4 +31,22 @@ router.post('/', (req, res, next) => {
   });
 });
 
+// Téléversement du tampon d'entreprise : même contrainte de taille, mais l'image est
+// détourée sur fond transparent avant d'être stockée.
+router.post('/stamp', (req, res, next) => {
+  upload.single('file')(req, res, err => {
+    if (err) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({
+          success: false,
+          error: 'upload.file_too_large',
+          message: 'Le fichier est trop lourd. La taille maximale autorisée est de 30 Mo.',
+        });
+      }
+      return next(err);
+    }
+    return uploadController.uploadStamp(req, res, next);
+  });
+});
+
 module.exports = router;

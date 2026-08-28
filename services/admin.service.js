@@ -1,5 +1,9 @@
 const User = require('../models/user.model');
 const RefusalReason = require('../models/refusalReason.model');
+const VehicleDossier = require('../models/vehicleDossier.model');
+const Ticket = require('../models/ticket.model');
+const Session = require('../models/session.model');
+const Sale = require('../models/sale.model');
 const { sendEmail } = require('../config/mail');
 const { normalizeLanguage, approvalEmail, rejectionEmail, correctionEmail } = require('./emailTemplates.service');
 
@@ -30,6 +34,15 @@ const getUsers = async (filters = {}) => {
   const page = Math.max(1, parseInt(filters.page, 10) || 1);
   const limit = Math.max(1, Math.min(100, parseInt(filters.limit, 10) || 20));
 
+  let columnFilters = {};
+  if (filters.columnFilters) {
+    try {
+      columnFilters = typeof filters.columnFilters === 'string' ? JSON.parse(filters.columnFilters) : filters.columnFilters;
+    } catch (e) {
+      columnFilters = {};
+    }
+  }
+
   const query = { role: { $ne: 'admin' } };
   if (role && role !== 'all') query.role = role;
   if (status && status !== 'all') query.status = STATUS_GROUP_MAP[status] || status;
@@ -40,7 +53,20 @@ const getUsers = async (filters = {}) => {
     if (dateTo) query.createdAt.$lte = new Date(`${dateTo}T23:59:59.999Z`);
   }
 
+  if (columnFilters.companyName) query.companyName = new RegExp(escapeRegExp(String(columnFilters.companyName)), 'i');
+  if (columnFilters.activityType) query.activityType = new RegExp(escapeRegExp(String(columnFilters.activityType)), 'i');
+  if (columnFilters.city) query['address.city'] = new RegExp(escapeRegExp(String(columnFilters.city)), 'i');
+  if (columnFilters.email) query.email = new RegExp(escapeRegExp(String(columnFilters.email)), 'i');
+  if (columnFilters.phone) query.phone = new RegExp(escapeRegExp(String(columnFilters.phone)), 'i');
+  if (columnFilters.status) query.status = STATUS_GROUP_MAP[columnFilters.status] || columnFilters.status;
+  if (columnFilters.submittedAt) {
+    const start = new Date(`${columnFilters.submittedAt}T00:00:00.000Z`);
+    const end = new Date(`${columnFilters.submittedAt}T23:59:59.999Z`);
+    query.createdAt = { $gte: start, $lte: end };
+  }
+
   const conditions = [query];
+
   if (search) {
     const regex = new RegExp(escapeRegExp(search), 'i');
     conditions.push({
@@ -327,9 +353,209 @@ const updateUserStatus = async (userId, newStatus) => {
   user.status = newStatus;
   await user.save();
 
+  if ((newStatus === 'suspendu' || newStatus === 'bloque') && user.role === 'acheteur') {
+    try {
+      const { revokeOngoingSalesForSuspendedBuyer } = require('./sale.service');
+      await revokeOngoingSalesForSuspendedBuyer(user._id, 'suspension_admin');
+    } catch (err) {
+      console.error(`Erreur réattribution des ventes lors de la suspension admin de ${user._id}:`, err.message);
+    }
+  }
+
   const userObj = user.toObject();
   delete userObj.password;
   return userObj;
+};
+
+/**
+ * Retrieve dashboard statistics (KPIs and pending actions)
+ */
+const getDashboardStats = async () => {
+  // Pending actions
+  const pendingUsersCount = await User.countDocuments({ status: 'en_attente', role: { $in: ['acheteur', 'vendeur'] } });
+  const pendingDossiersCount = await VehicleDossier.countDocuments({ status: 'soumis' });
+  const pendingTicketsCount = await Ticket.countDocuments({ status: 'en_attente_admin' });
+
+  // KPIs
+  const activeSessionsCount = await Session.countDocuments({ status: 'en_cours' });
+  const validatedUsersCount = await User.countDocuments({ status: 'valide', role: { $in: ['acheteur', 'vendeur'] } });
+  
+  // Total transaction volume
+  const sales = await Sale.find({ status: { $in: ['en_attente_paiement', 'paye', 'cloture'] } });
+  const totalTransactionVolume = sales.reduce((acc, sale) => acc + (sale.winningOfferAmount || 0), 0);
+  
+  // Completed sales count
+  const completedSalesCount = await Sale.countDocuments({ status: 'cloture' });
+
+  // Recent activities (last 5 users)
+  const recentUsers = await User.find({ role: { $in: ['acheteur', 'vendeur'] } })
+    .sort({ createdAt: -1 })
+    .limit(5)
+    .select('firstName lastName companyName role email createdAt status');
+  // Late payments (Step 1 or 2, >80% time elapsed or overdue)
+  const allCurrentPayments = await Sale.find({
+    status: 'en_cours',
+    currentStep: { $in: [1, 2] },
+  })
+    .populate('vehicle', 'brand model year')
+    .populate('winner', 'firstName lastName companyName')
+    .lean();
+
+  const now = new Date();
+  const latePaymentSales = allCurrentPayments
+    .filter((sale) => {
+      if (!sale.currentStepDueAt) return false;
+      const dueAt = new Date(sale.currentStepDueAt);
+      const startedAt = sale.currentStepStartedAt
+        ? new Date(sale.currentStepStartedAt)
+        : sale.wonAt
+          ? new Date(sale.wonAt)
+          : sale.createdAt
+            ? new Date(sale.createdAt)
+            : null;
+
+      if (now >= dueAt) return true; // Déjà dépassé
+      if (!startedAt) return false;
+
+      const total = dueAt.getTime() - startedAt.getTime();
+      if (total <= 0) return true;
+
+      const elapsedPercent = ((now.getTime() - startedAt.getTime()) / total) * 100;
+      return elapsedPercent >= 80;
+    })
+    .map((sale) => ({
+      ...sale,
+      winningOfferAmount: sale.amount || sale.winningOfferAmount || 0,
+    }));
+    
+  return {
+    pendingActions: {
+      users: pendingUsersCount,
+      dossiers: pendingDossiersCount,
+      tickets: pendingTicketsCount,
+      latePayments: latePaymentSales,
+    },
+    kpis: {
+      activeSessions: activeSessionsCount,
+      validatedUsers: validatedUsersCount,
+      totalTransactionVolume,
+      completedSales: completedSalesCount
+    },
+    recentActivities: {
+      users: recentUsers
+    }
+  };
+};
+
+/**
+ * Liste de tous les paiements Stripe (commission de vente & réactivation de compte)
+ */
+const listPayments = async (filters = {}) => {
+  const Payment = require('../models/payment.model');
+  const { type, search } = filters;
+
+  const query = {};
+  if (type && type !== 'all') {
+    query.type = type;
+  }
+
+  // 1. Récupérer les enregistrements de la collection Payment
+  let payments = await Payment.find(query)
+    .populate('user', 'firstName lastName email companyName role')
+    .populate({
+      path: 'sale',
+      populate: { path: 'vehicle', select: 'brand model year' },
+    })
+    .sort({ paidAt: -1, createdAt: -1 })
+    .lean();
+
+  // 2. Si la collection est encore vide (ex: ventes passées avant la création du modèle),
+  // on réconcilie à partir des ventes ayant commissionPaidAt
+  if (payments.length === 0) {
+    const paidSales = await Sale.find({ commissionPaidAt: { $ne: null } })
+      .populate('winner', 'firstName lastName email companyName role')
+      .populate('vehicle', 'brand model year')
+      .populate('winningOffer', 'fees')
+      .sort({ commissionPaidAt: -1 })
+      .lean();
+
+    for (const sale of paidSales) {
+      if (!sale.winner) continue;
+      const amountInEuros = sale.commissionPayment?.amount ? sale.commissionPayment.amount / 100 : (sale.winningOffer?.fees?.total || sale.winningOffer?.fees?.commission || sale.fees?.commission || 300);
+      try {
+        await Payment.create({
+          user: sale.winner._id,
+          sale: sale._id,
+          type: 'paiement_commission',
+          amount: amountInEuros,
+          currency: 'eur',
+          stripeSessionId: sale.commissionPayment?.checkoutSessionId || null,
+          stripePaymentIntentId: sale.commissionPayment?.paymentIntentId || null,
+          status: 'paye',
+          paidAt: sale.commissionPaidAt || sale.createdAt,
+        });
+      } catch (e) {
+        // Ignorer les doublons
+      }
+    }
+
+    payments = await Payment.find(query)
+      .populate('user', 'firstName lastName email companyName role')
+      .populate({
+        path: 'sale',
+        populate: { path: 'vehicle', select: 'brand model year' },
+      })
+      .sort({ paidAt: -1, createdAt: -1 })
+      .lean();
+  }
+
+  // Application de la recherche textuelle éventuelle
+  if (search) {
+    const s = search.toLowerCase();
+    payments = payments.filter((p) => {
+      const u = p.user || {};
+      const fullName = `${u.firstName || ''} ${u.lastName || ''}`.toLowerCase();
+      const company = (u.companyName || '').toLowerCase();
+      const email = (u.email || '').toLowerCase();
+      const stripeId = (p.stripeSessionId || p.stripePaymentIntentId || '').toLowerCase();
+      const vehicle = p.sale?.vehicle ? `${p.sale.vehicle.brand} ${p.sale.vehicle.model}`.toLowerCase() : '';
+      return fullName.includes(s) || company.includes(s) || email.includes(s) || stripeId.includes(s) || vehicle.includes(s);
+    });
+  }
+
+  // Calcul des statistiques cumulées
+  const totalAmount = payments.reduce((acc, p) => acc + (p.amount || 0), 0);
+  const commissionPaymentsCount = payments.filter((p) => p.type === 'paiement_commission').length;
+  const reactivationPaymentsCount = payments.filter((p) => p.type === 'reactivation_compte').length;
+
+  return {
+    payments: payments.map((p) => ({
+      id: String(p._id),
+      user: p.user ? {
+        id: String(p.user._id),
+        name: `${p.user.firstName || ''} ${p.user.lastName || ''}`.trim() || p.user.companyName || 'Utilisateur',
+        companyName: p.user.companyName || '',
+        email: p.user.email || '',
+        role: p.user.role || 'acheteur',
+      } : null,
+      saleId: p.sale ? String(p.sale._id) : null,
+      vehicle: p.sale?.vehicle ? `${p.sale.vehicle.brand} ${p.sale.vehicle.model}` : null,
+      type: p.type,
+      typeLabel: p.type === 'paiement_commission' ? 'Paiement de commission' : 'Réactivation de compte',
+      amount: p.amount,
+      currency: p.currency || 'eur',
+      provider: p.provider || 'stripe',
+      stripeId: p.stripeSessionId || p.stripePaymentIntentId || 'stripe_direct',
+      status: p.status || 'paye',
+      paidAt: p.paidAt || p.createdAt,
+    })),
+    summary: {
+      totalAmount,
+      commissionPaymentsCount,
+      reactivationPaymentsCount,
+      totalCount: payments.length,
+    },
+  };
 };
 
 module.exports = {
@@ -337,5 +563,7 @@ module.exports = {
   approveUser,
   rejectUser,
   requestCorrection,
-  updateUserStatus
+  updateUserStatus,
+  getDashboardStats,
+  listPayments,
 };

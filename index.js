@@ -5,13 +5,26 @@ const cookieParser = require('cookie-parser');
 const os = require('os');
 const connectDB = require('./config/db');
 const seedAdmin = require('./utils/seedAdmin');
+const seedTaxes = require('./utils/seedTaxes');
 const migrateLegacyVehicleDossierFields = require('./utils/migrateLegacyVehicleDossierFields');
+const migrateSirenToSiret = require('./utils/migrateSirenToSiret');
 const { errorHandler } = require('./middlewares/error.middleware');
 
 // Initialisation de l'application Express
 const app = express();
 
 const sessionService = require('./services/session.service');
+const saleService = require('./services/sale.service');
+
+// Synchroniser les sessions puis désigner les gagnants des sessions qui viennent de clôturer
+const syncSessionsAndAttributions = async () => {
+  await sessionService.autoGenerateAndSyncSessions();
+  await saleService.processClosedSessions();
+  // Rattrape les commissions encaissées dont le retour navigateur n'est jamais arrivé
+  await saleService.reconcilePendingCommissionPayments();
+  // Rappels à 50 % et 80 % du délai, puis retrait de l'attribution à l'expiration
+  await saleService.processStepDeadlines();
+};
 
 // Connexion à la base de données
 connectDB().then(() => {
@@ -19,17 +32,25 @@ connectDB().then(() => {
     console.error('Erreur migration des dossiers véhicules :', err.message);
   });
 
+  // Bascule du SIREN (9 chiffres) vers le SIRET (14 chiffres) pour les comptes existants
+  migrateSirenToSiret().catch((err) => {
+    console.error('Erreur migration SIREN vers SIRET :', err.message);
+  });
+
   // Seeding de l'administrateur par défaut après connexion réussie à la BDD
   seedAdmin();
 
+  // Seeding des taxes par défaut (TAV 20 %)
+  seedTaxes();
+
   // Initialiser et synchroniser automatiquement les sessions (ouvertes/clôturées)
-  sessionService.autoGenerateAndSyncSessions().catch((err) => {
+  syncSessionsAndAttributions().catch((err) => {
     console.error('Erreur initialisation des sessions:', err.message);
   });
 
   // Tâche de fond automatique toutes les 60 secondes
   setInterval(() => {
-    sessionService.autoGenerateAndSyncSessions().catch((err) => {
+    syncSessionsAndAttributions().catch((err) => {
       console.error('Erreur synchronisation automatique des sessions:', err.message);
     });
   }, 60 * 1000);
@@ -74,10 +95,14 @@ app.use('/api/auth', require('./routes/auth.routes'));
 app.use('/api/tickets', require('./routes/ticket.routes'));
 app.use('/api/admin', require('./routes/admin.routes'));
 app.use('/api/admin/messages', require('./routes/message.routes'));
+app.use('/api/admin/commissions', require('./routes/commission.routes'));
+app.use('/api/admin/general-config', require('./routes/generalConfig.routes'));
 app.use('/api/upload', require('./routes/upload.routes'));
 app.use('/api/vehicle-dossiers', require('./routes/vehicleDossier.routes'));
 app.use('/api/admin/vehicle-dossiers', require('./routes/adminVehicleDossier.routes'));
 app.use('/api/sessions', require('./routes/session.routes'));
+app.use('/api/offers', require('./routes/offer.routes'));
+app.use('/api/sales', require('./routes/sale.routes'));
 app.use('/api/public', require('./routes/publicSales.routes'));
 
 // Service de fichiers statiques (fallback local si nécessaire)

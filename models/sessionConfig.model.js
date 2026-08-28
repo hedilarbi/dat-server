@@ -18,10 +18,8 @@ const sessionConfigSchema = new mongoose.Schema({
     type: Number,
     default: 4, // Générer 4 semaines à l'avance
   },
-  autoAssignVehicles: {
-    type: Boolean,
-    default: true, // Affecter automatiquement les véhicules validés
-  },
+  // La génération automatique ne crée que le calendrier : l'affectation des véhicules
+  // à une session est toujours faite manuellement par l'administrateur.
 }, {
   timestamps: true,
 });

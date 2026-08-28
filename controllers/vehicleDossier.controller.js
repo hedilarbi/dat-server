@@ -22,8 +22,11 @@ const updateDossier = async (req, res, next) => {
 
 const listDossiers = async (req, res, next) => {
   try {
-    const dossiers = await vehicleDossierService.listDossiers(req.user._id, { status: req.query.status });
-    res.status(200).json({ success: true, dossiers });
+    const { status, brand, model, reservePrice, page, limit } = req.query;
+    const result = await vehicleDossierService.listDossiers(req.user._id, {
+      status, brand, model, reservePrice, page, limit,
+    });
+    res.status(200).json({ success: true, ...result });
   } catch (error) {
     next(error);
   }

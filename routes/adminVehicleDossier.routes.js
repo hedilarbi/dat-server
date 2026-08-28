@@ -8,6 +8,8 @@ router.use(protect, adminOnly);
 
 router.get('/', adminVehicleDossierController.listDossiers);
 router.get('/available', adminVehicleDossierController.getAvailableDossiers);
+router.get('/ventes', adminVehicleDossierController.listVehicleSales);
+router.get('/tentatives-max', adminVehicleDossierController.listMaxedOutVehicles);
 router.get('/:id', adminVehicleDossierController.getDossierById);
 router.put('/:id', adminVehicleDossierController.updateDossier);
 router.put('/:id/media', adminVehicleDossierController.updateDossierMedia);

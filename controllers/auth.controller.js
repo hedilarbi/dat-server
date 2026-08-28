@@ -1,7 +1,6 @@
 const { isValidPhoneNumber } = require('libphonenumber-js');
 const authService = require('../services/auth.service');
 
-const SIREN_REGEX = /^\d{9}$/;
 
 const cookieOptions = {
   httpOnly: true,
@@ -107,7 +106,7 @@ const registerStep2 = async (req, res, next) => {
   try {
     // req.user est déjà défini par le middleware de protection d'authentification
     const userId = req.user._id;
-    const { firstName, lastName, companyName, activityType, phone, address, kbisNumber, kbisUrl, cinRectoUrl, cinVersoUrl, vhuNumber, bankInfo } = req.body;
+    const { firstName, lastName, companyName, activityType, phone, address, siret, kbisUrl, cinRectoUrl, cinVersoUrl, vhuNumber, bankInfo, stampUrl } = req.body;
 
     const user = await authService.registerStep2(userId, {
       firstName,
@@ -116,7 +115,8 @@ const registerStep2 = async (req, res, next) => {
       activityType,
       phone,
       address,
-      kbisNumber,
+      siret,
+      stampUrl,
       kbisUrl,
       cinRectoUrl,
       cinVersoUrl,
@@ -291,6 +291,54 @@ const updateLanguage = async (req, res, next) => {
   }
 };
 
+/**
+ * Mettre à jour le tampon de l'utilisateur connecté
+ */
+const updateStamp = async (req, res, next) => {
+  try {
+    const user = await authService.updateStamp(req.user._id, req.body.stampUrl);
+
+    res.status(200).json({
+      success: true,
+      message: 'Tampon mis à jour avec succès.',
+      user
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const startPendingCommissionPayment = async (req, res, next) => {
+  try {
+    const data = await authService.startPendingCommissionPayment(req.user._id);
+    res.status(200).json({ success: true, ...data });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const startPendingCommissionIntent = async (req, res, next) => {
+  try {
+    const data = await authService.startPendingCommissionIntent(req.user._id);
+    res.status(200).json({ success: true, ...data });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const confirmPendingCommissionPayment = async (req, res, next) => {
+  try {
+    const user = await authService.confirmPendingCommissionPayment(req.user._id, req.body.checkoutSessionId);
+    res.status(200).json({
+      success: true,
+      message: 'Commission réglée. Votre compte est réactivé.',
+      user
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   registerStep1,
   resendOtp,
@@ -302,5 +350,9 @@ module.exports = {
   logout,
   getMe,
   updatePushToken,
-  updateLanguage
+  updateLanguage,
+  updateStamp,
+  startPendingCommissionPayment,
+  startPendingCommissionIntent,
+  confirmPendingCommissionPayment
 };

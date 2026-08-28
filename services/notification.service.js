@@ -20,6 +20,7 @@ const createAdminRegistrationNotification = async (user) => {
   return Notification.create({
     recipientRole: 'admin',
     type: 'registration_submitted',
+    category: 'inscription',
     title: `Nouvelle inscription ${roleLabel}`,
     message: `${user.companyName} a soumis un dossier ${roleLabel} à valider.`,
     createdByUser: user._id,
@@ -38,6 +39,7 @@ const createAdminVehicleDossierNotification = async (dossier, seller) => {
   return Notification.create({
     recipientRole: 'admin',
     type: 'vehicle_dossier_submitted',
+    category: 'dossier_vehicule',
     title: 'Nouveau dossier véhicule soumis',
     message: `${seller.companyName} a soumis un dossier véhicule (${vehicleLabel}) à valider.`,
     createdByUser: seller._id,
@@ -54,6 +56,7 @@ const createAdminTicketNotification = async (ticket, user) => {
   return Notification.create({
     recipientRole: 'admin',
     type: 'ticket_created',
+    category: 'support',
     title: 'Nouvelle demande de support',
     message: `${user.companyName} a ouvert une demande de support : "${ticket.title}".`,
     createdByUser: user._id,
@@ -92,11 +95,48 @@ const markAllAdminNotificationsAsRead = async () => {
   return { message: 'Notifications marquées comme lues.' };
 };
 
+const createAdminLatePaymentNotification = async (sale, vehicle, buyer) => {
+  const vehicleLabel = [vehicle.brand, vehicle.model].filter(Boolean).join(' ') || 'Véhicule';
+
+  return Notification.create({
+    recipientRole: 'admin',
+    type: 'late_payment_alert',
+    category: 'ventes',
+    title: `Alerte: Paiement véhicule en retard`,
+    message: `L'acheteur ${buyer.firstName} ${buyer.lastName} a dépassé 80% du délai pour payer le véhicule ${vehicleLabel}.`,
+    metadata: {
+      saleId: sale._id.toString(),
+      vehicleId: vehicle._id.toString(),
+      buyerId: buyer._id.toString()
+    }
+  });
+};
+
+const createAdminCertificateRejectedNotification = async (sale, vehicle, buyer, seller) => {
+  const vehicleLabel = [vehicle.brand, vehicle.model].filter(Boolean).join(' ') || 'Véhicule';
+
+  return Notification.create({
+    recipientRole: 'admin',
+    type: 'certificate_rejected',
+    category: 'ventes',
+    title: `Alerte: Certificat refusé`,
+    message: `Le vendeur ${seller.companyName || seller.firstName + ' ' + seller.lastName} a refusé le certificat de cession de ${buyer.companyName || buyer.firstName + ' ' + buyer.lastName} pour le véhicule ${vehicleLabel}.`,
+    metadata: {
+      saleId: sale._id.toString(),
+      vehicleId: vehicle._id.toString(),
+      sellerId: seller._id.toString(),
+      buyerId: buyer._id.toString()
+    }
+  });
+};
+
 module.exports = {
   getAdminNotifications,
   createAdminRegistrationNotification,
   createAdminVehicleDossierNotification,
   createAdminTicketNotification,
+  createAdminLatePaymentNotification,
+  createAdminCertificateRejectedNotification,
   markNotificationAsRead,
   markAllAdminNotificationsAsRead
 };

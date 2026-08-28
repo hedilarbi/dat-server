@@ -4,8 +4,11 @@ const { isValidPhoneNumber } = require('libphonenumber-js');
 const { sendEmail } = require('../config/mail');
 const { createAdminRegistrationNotification } = require('./notification.service');
 const { normalizeLanguage, otpEmail, passwordResetEmail } = require('./emailTemplates.service');
+const paymentService = require('./payment.service');
+const { isStripeConfigured } = require('../config/stripe');
 
-const SIREN_REGEX = /^\d{9}$/;
+// SIRET : 14 chiffres (SIREN sur 9 + NIC sur 5)
+const SIRET_REGEX = /^\d{14}$/;
 
 /**
  * Génère un code OTP à 6 chiffres
@@ -32,12 +35,31 @@ const registerStep1 = async (userData) => {
   const { email, password, firstName, lastName, companyName, activityType, phone, role } = userData;
   const language = normalizeLanguage(userData.language);
 
-  // 1. Vérifier si l'utilisateur existe déjà
+  // 1. Vérifier l'unicité de l'e-mail, de la raison sociale et du téléphone
   const userExists = await User.findOne({ email });
   if (userExists) {
-    const err = new Error('Cet e-mail est déjà utilisé.');
+    const err = new Error('Cet e-mail est déjà utilisé par un autre compte.');
     err.codeName = 'auth.email_already_exists';
     throw err;
+  }
+
+  if (companyName) {
+    const escapedCompany = companyName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const companyExists = await User.findOne({ companyName: new RegExp(`^${escapedCompany}$`, 'i') });
+    if (companyExists) {
+      const err = new Error('Cette raison sociale (nom d’entreprise) est déjà enregistrée par un autre compte.');
+      err.codeName = 'auth.company_name_already_exists';
+      throw err;
+    }
+  }
+
+  if (phone) {
+    const phoneExists = await User.findOne({ phone: phone.trim() });
+    if (phoneExists) {
+      const err = new Error('Ce numéro de téléphone est déjà utilisé par un autre compte.');
+      err.codeName = 'auth.phone_already_exists';
+      throw err;
+    }
   }
 
   // 2. Générer l'OTP et sa date d'expiration (15 minutes)
@@ -194,7 +216,7 @@ const registerStep2 = async (userId, profileData) => {
     throw err;
   }
 
-  const { firstName, lastName, companyName, activityType, phone, address, kbisNumber, kbisUrl, cinRectoUrl, cinVersoUrl, vhuNumber, bankInfo } = profileData;
+  const { firstName, lastName, companyName, activityType, phone, address, siret, kbisUrl, cinRectoUrl, cinVersoUrl, vhuNumber, bankInfo, stampUrl } = profileData;
 
   // Validation des champs obligatoires pour l'étape 2
   if (!address || !address.street || !address.city || !address.country || !address.postalCode) {
@@ -203,16 +225,46 @@ const registerStep2 = async (userId, profileData) => {
     throw err;
   }
 
-  if (!kbisNumber) {
-    const err = new Error('Le numéro SIREN est obligatoire.');
-    err.codeName = 'auth.kbis_number_missing';
+  if (!siret) {
+    const err = new Error('Le numéro SIRET est obligatoire.');
+    err.codeName = 'auth.siret_missing';
     throw err;
   }
 
-  if (!SIREN_REGEX.test(kbisNumber.replace(/\s/g, ''))) {
-    const err = new Error('Le numéro SIREN doit contenir exactement 9 chiffres.');
-    err.codeName = 'auth.siren_invalid';
+  const cleanSiret = siret.replace(/\s/g, '');
+  if (!SIRET_REGEX.test(cleanSiret)) {
+    const err = new Error('Le numéro SIRET doit contenir exactement 14 chiffres.');
+    err.codeName = 'auth.siret_invalid';
     throw err;
+  }
+
+  const existingSiret = await User.findOne({ siret: cleanSiret, _id: { $ne: user._id } });
+  if (existingSiret) {
+    const err = new Error('Ce numéro SIRET est déjà enregistré par un autre compte.');
+    err.codeName = 'auth.siret_already_exists';
+    throw err;
+  }
+
+  if (companyName && companyName.trim() !== user.companyName) {
+    const escapedCompany = companyName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const companyExists = await User.findOne({
+      companyName: new RegExp(`^${escapedCompany}$`, 'i'),
+      _id: { $ne: user._id }
+    });
+    if (companyExists) {
+      const err = new Error('Cette raison sociale (nom d’entreprise) est déjà enregistrée par un autre compte.');
+      err.codeName = 'auth.company_name_already_exists';
+      throw err;
+    }
+  }
+
+  if (phone && phone.trim() !== user.phone) {
+    const phoneExists = await User.findOne({ phone: phone.trim(), _id: { $ne: user._id } });
+    if (phoneExists) {
+      const err = new Error('Ce numéro de téléphone est déjà utilisé par un autre compte.');
+      err.codeName = 'auth.phone_already_exists';
+      throw err;
+    }
   }
 
   if (phone && !isValidPhoneNumber(phone)) {
@@ -260,8 +312,10 @@ const registerStep2 = async (userId, profileData) => {
 
   // Mettre à jour l'utilisateur
   user.address = address;
-  user.kbisNumber = kbisNumber;
+  user.siret = siret.replace(/\s/g, '');
   user.kbisUrl = kbisUrl;
+  // Le tampon est facultatif : une valeur absente ne doit pas effacer celui déjà déposé
+  if (stampUrl !== undefined) user.stampUrl = stampUrl;
   user.cinRectoUrl = cinRectoUrl;
   user.cinVersoUrl = cinVersoUrl;
   user.status = 'soumis'; // Passe à soumis pour validation par l'admin
@@ -305,12 +359,6 @@ const login = async (email, password, role) => {
   }
 
   // Vérifier le statut du compte
-  if (user.status === 'suspendu') {
-    const err = new Error('Votre compte est suspendu. Veuillez contacter le support.');
-    err.codeName = 'auth.account_suspended';
-    throw err;
-  }
-
   if (user.status === 'bloque') {
     const err = new Error('Votre compte est bloqué. Veuillez contacter le support.');
     err.codeName = 'auth.account_blocked';
@@ -424,6 +472,113 @@ const updateLanguage = async (userId, language) => {
   return userObj;
 };
 
+/**
+ * Enregistre (ou remplace) le tampon d'un compte déjà inscrit.
+ *
+ * L'image a déjà été détourée par POST /api/upload/stamp : on ne stocke ici que l'URL
+ * du PNG transparent produit. Une chaîne vide permet de retirer le tampon.
+ */
+const updateStamp = async (userId, stampUrl) => {
+  const user = await User.findById(userId);
+
+  if (!user) {
+    const err = new Error('Utilisateur introuvable.');
+    err.codeName = 'auth.user_not_found';
+    throw err;
+  }
+
+  const normalized = typeof stampUrl === 'string' ? stampUrl.trim() : '';
+  if (normalized && !/^https?:\/\//i.test(normalized)) {
+    const err = new Error('URL de tampon invalide.');
+    err.codeName = 'auth.invalid_stamp_url';
+    err.statusCode = 400;
+    throw err;
+  }
+
+  user.stampUrl = normalized;
+  await user.save();
+
+  const userObj = user.toObject();
+  delete userObj.password;
+  delete userObj.otp;
+
+  return userObj;
+};
+
+const startPendingCommissionPayment = async (userId) => {
+  const user = await User.findById(userId);
+  if (!user || !user.pendingCommission?.amount) {
+    throw new Error('Aucune commission en attente.');
+  }
+  if (!isStripeConfigured()) throw new Error('Paiement indisponible (Stripe non configuré).');
+
+  const { session, amount } = await paymentService.createPendingCommissionCheckout({
+    amount: user.pendingCommission.amount,
+    user,
+    language: user.language
+  });
+
+  return { clientSecret: session.client_secret, amount };
+};
+
+const startPendingCommissionIntent = async (userId) => {
+  const user = await User.findById(userId);
+  if (!user || !user.pendingCommission?.amount) {
+    throw new Error('Aucune commission en attente.');
+  }
+  if (!isStripeConfigured()) throw new Error('Paiement indisponible (Stripe non configuré).');
+
+  return paymentService.createPendingCommissionPaymentIntent({
+    amount: user.pendingCommission.amount,
+    user
+  });
+};
+
+const confirmPendingCommissionPayment = async (userId, checkoutSessionId) => {
+  const user = await User.findById(userId);
+  if (!user) throw new Error('Utilisateur introuvable.');
+  if (!user.pendingCommission?.amount) return user; // Déjà réglée
+
+  const session = await paymentService.retrieveCommissionCheckout(checkoutSessionId);
+  if (session.purpose !== 'pending_commission' || String(session.userId) !== String(userId)) {
+    const err = new Error('Session de paiement invalide.');
+    err.codeName = 'payment.invalid_session';
+    throw err;
+  }
+  if (!session.paid) {
+    const err = new Error('Paiement non abouti.');
+    err.codeName = 'payment.not_paid';
+    throw err;
+  }
+
+  try {
+    const Payment = require('../models/payment.model');
+    await Payment.create({
+      user: user._id,
+      sale: user.pendingCommission?.saleId || null,
+      type: 'reactivation_compte',
+      amount: user.pendingCommission.amount,
+      currency: 'eur',
+      stripeSessionId: checkoutSessionId || null,
+      status: 'paye',
+      paidAt: new Date(),
+    });
+  } catch (err) {
+    console.error('Erreur enregistrement Payment réactivation:', err.message);
+  }
+
+  user.pendingCommission = undefined;
+  if (user.status === 'suspendu') {
+    user.status = 'valide';
+  }
+  await user.save();
+
+  const userObj = user.toObject();
+  delete userObj.password;
+  delete userObj.otp;
+  return userObj;
+};
+
 module.exports = {
   registerStep1,
   resendOtp,
@@ -433,5 +588,9 @@ module.exports = {
   forgotPassword,
   resetPassword,
   updateLanguage,
+  updateStamp,
+  startPendingCommissionPayment,
+  startPendingCommissionIntent,
+  confirmPendingCommissionPayment,
   generateToken
 };

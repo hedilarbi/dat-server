@@ -400,6 +400,898 @@ const dossierCorrectionEmail = ({ user, vehicleLabel, reasonsText, reasonsPlain,
   };
 };
 
+// Slug de la page de détail d'une vente gagnée, par langue (miroir de client/app/routing.ts)
+const WON_SALE_PATH = { fr: '/fr/acheteur/tableau-de-bord/mes-vehicules', en: '/en/acheteur/tableau-de-bord/mes-vehicules' };
+const SELLER_SALES_PATH = { fr: '/fr/vendeur/ventes', en: '/en/seller/sales' };
+
+/**
+ * Exprime un délai en heures sous une forme lisible : « 48 heures (2 jours) ».
+ */
+const formatDeadline = (hours, lang) => {
+  const days = Math.floor(hours / 24);
+  const hourLabel = lang === 'fr' ? 'heures' : 'hours';
+  if (days < 1) return `${hours} ${hourLabel}`;
+  const dayLabel = lang === 'fr' ? (days > 1 ? 'jours' : 'jour') : (days > 1 ? 'days' : 'day');
+  return `${hours} ${hourLabel} (${days} ${dayLabel})`;
+};
+
+/**
+ * Carte véhicule reprise dans l'e-mail : photo de couverture, marque, modèle et année.
+ * La photo est omise si le dossier n'en a aucune, plutôt que d'afficher une image cassée.
+ */
+const vehicleCard = (photoUrl, title, subtitle) => `
+  <table style="width: 100%; border-collapse: collapse; background-color: #FFFFFF; border: 1px solid #DCD7CB; border-radius: 8px; margin: 18px 0;">
+    <tr>
+      ${photoUrl ? `<td style="width: 140px; padding: 12px;">
+        <img src="${photoUrl}" alt="${title}" width="128" style="width: 128px; height: 96px; object-fit: cover; border-radius: 6px; display: block;" />
+      </td>` : ''}
+      <td style="padding: 12px; vertical-align: middle;">
+        <div style="color: #13243C; font-size: 17px; font-weight: bold; text-transform: uppercase;">${title}</div>
+        <div style="color: #5A5E66; font-size: 13px; margin-top: 4px;">${subtitle}</div>
+      </td>
+    </tr>
+  </table>
+`;
+
+const saleWonEmail = ({ user, brand, model, year, photoUrl, sessionName, amount, saleId, deadlineHours }) => {
+  const lang = normalizeLanguage(user.language);
+  const locale = lang === 'fr' ? 'fr-FR' : 'en-GB';
+  const url = `${CLIENT_BASE_URL}${WON_SALE_PATH[lang]}/${saleId}`;
+  const price = Number(amount).toLocaleString(locale);
+  const vehicleLabel = [brand, model].filter(Boolean).join(' ') || (lang === 'fr' ? 'Véhicule' : 'Vehicle');
+  const delay = formatDeadline(deadlineHours, lang);
+
+  const copy = {
+    fr: {
+      subject: `Vous avez remporté ${vehicleLabel} ! - DealAutoPro`,
+      heading: 'Vous avez remporté cette enchère',
+      hello: `Bonjour ${user.firstName} ${user.lastName},`,
+      subtitle: [year ? `Année ${year}` : null, sessionName].filter(Boolean).join(' · '),
+      line1: `Votre offre de ${price} € est la meilleure offre retenue à la clôture de ${sessionName}.`,
+      line2: 'Connectez-vous à la plateforme pour entamer votre procédure d\'achat. Elle commence par le paiement de la commission plateforme.',
+      line3: `Vous disposez de ${delay} pour finaliser cette première étape. Passé ce délai, le véhicule sera attribué à l'offre suivante.`,
+      cta: 'Entamer ma procédure d\'achat',
+      text: `Vous avez remporté ${vehicleLabel}${year ? ` (${year})` : ''} lors de ${sessionName}, avec une offre de ${price} €. `
+        + `Connectez-vous pour entamer votre procédure d'achat : vous avez ${delay} pour payer la commission plateforme. ${url}`,
+      footer: "L'équipe DealAutoPro"
+    },
+    en: {
+      subject: `You won ${vehicleLabel}! - DealAutoPro`,
+      heading: 'You won this auction',
+      hello: `Hello ${user.firstName} ${user.lastName},`,
+      subtitle: [year ? `Year ${year}` : null, sessionName].filter(Boolean).join(' · '),
+      line1: `Your bid of €${price} is the winning bid at the close of ${sessionName}.`,
+      line2: 'Sign in to the platform to start your purchase procedure. It begins with paying the platform commission.',
+      line3: `You have ${delay} to complete this first step. After that, the vehicle will be awarded to the next bidder.`,
+      cta: 'Start my purchase',
+      text: `You won ${vehicleLabel}${year ? ` (${year})` : ''} in ${sessionName}, with a bid of €${price}. `
+        + `Sign in to start your purchase procedure: you have ${delay} to pay the platform commission. ${url}`,
+      footer: 'The DealAutoPro team'
+    }
+  }[lang];
+
+  return {
+    subject: copy.subject,
+    text: copy.text,
+    html: layout({
+      heading: copy.heading,
+      footer: copy.footer,
+      body: `
+        <p style="color: #1A2230; font-size: 16px;">${copy.hello}</p>
+        ${vehicleCard(photoUrl, vehicleLabel, copy.subtitle)}
+        <p style="color: #5A5E66; font-size: 14px;">${copy.line1}</p>
+        <p style="color: #5A5E66; font-size: 14px;">${copy.line2}</p>
+        <p style="color: #B04A2C; font-size: 14px; font-weight: bold;">${copy.line3}</p>
+        <div style="text-align: center; margin: 30px 0;">
+          <a href="${url}" style="background-color: #D9704F; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold;">${copy.cta}</a>
+        </div>
+      `
+    })
+  };
+};
+
+// Libellés des étapes de la procédure d'achat (miroir de PURCHASE_STEPS du modèle Sale)
+const STEP_LABELS = {
+  fr: {
+    commission: 'Paiement de la commission',
+    virement: 'Virement au vendeur',
+    certificats: 'Certificats de cession',
+    signature: 'Signature et dépôt des documents',
+    validation_vendeur: 'Validation par le vendeur',
+    enlevement: 'Enlèvement du véhicule',
+  },
+  en: {
+    commission: 'Commission payment',
+    virement: 'Transfer to the seller',
+    certificats: 'Transfer certificates',
+    signature: 'Sign and upload documents',
+    validation_vendeur: 'Seller confirmation',
+    enlevement: 'Vehicle collection',
+  },
+};
+
+/** Durée restante exprimée en heures et minutes. */
+const formatRemaining = (milliseconds, lang) => {
+  const totalMinutes = Math.max(0, Math.round(milliseconds / 60000));
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (lang === 'fr') return hours > 0 ? `${hours} h ${String(minutes).padStart(2, '0')}` : `${minutes} minutes`;
+  return hours > 0 ? `${hours}h ${String(minutes).padStart(2, '0')}` : `${minutes} minutes`;
+};
+
+/**
+ * Rappel envoyé à l'acheteur lorsqu'une part définie du délai de l'étape courante s'est écoulée.
+ */
+const saleStepReminderEmail = ({ user, brand, model, year, photoUrl, sessionName, stepKey, saleId, remainingMs }) => {
+  const lang = normalizeLanguage(user.language);
+  const url = `${CLIENT_BASE_URL}${WON_SALE_PATH[lang]}/${saleId}`;
+  const vehicleLabel = [brand, model].filter(Boolean).join(' ') || (lang === 'fr' ? 'Véhicule' : 'Vehicle');
+  const stepLabel = STEP_LABELS[lang][stepKey] || stepKey;
+  const remaining = formatRemaining(remainingMs, lang);
+
+  const copy = {
+    fr: {
+      subject: `Rappel : ${remaining} pour finaliser « ${stepLabel} » - DealAutoPro`,
+      heading: 'Votre procédure d’achat attend une action',
+      hello: `Bonjour ${user.firstName} ${user.lastName},`,
+      subtitle: [year ? `Année ${year}` : null, sessionName].filter(Boolean).join(' · '),
+      line1: `L'étape « ${stepLabel} » de votre achat n'est pas encore finalisée.`,
+      line2: `Il vous reste ${remaining} pour la terminer.`,
+      line3: 'Passé ce délai, vous perdrez l\'attribution du véhicule et il sera proposé à l\'offre suivante.',
+      cta: 'Reprendre ma procédure',
+      text: `Rappel : il vous reste ${remaining} pour finaliser l'étape « ${stepLabel} » de votre achat (${vehicleLabel}). ${url}`,
+      footer: "L'équipe DealAutoPro"
+    },
+    en: {
+      subject: `Reminder: ${remaining} left to complete "${stepLabel}" - DealAutoPro`,
+      heading: 'Your purchase is waiting for an action',
+      hello: `Hello ${user.firstName} ${user.lastName},`,
+      subtitle: [year ? `Year ${year}` : null, sessionName].filter(Boolean).join(' · '),
+      line1: `The "${stepLabel}" step of your purchase is not complete yet.`,
+      line2: `You have ${remaining} left to finish it.`,
+      line3: 'After that, you will lose the vehicle and it will be offered to the next bidder.',
+      cta: 'Resume my purchase',
+      text: `Reminder: you have ${remaining} left to complete the "${stepLabel}" step of your purchase (${vehicleLabel}). ${url}`,
+      footer: 'The DealAutoPro team'
+    }
+  }[lang];
+
+  return {
+    subject: copy.subject,
+    text: copy.text,
+    html: layout({
+      heading: copy.heading,
+      footer: copy.footer,
+      body: `
+        <p style="color: #1A2230; font-size: 16px;">${copy.hello}</p>
+        ${vehicleCard(photoUrl, vehicleLabel, copy.subtitle)}
+        <p style="color: #5A5E66; font-size: 14px;">${copy.line1}</p>
+        <p style="color: #13243C; font-size: 15px; font-weight: bold;">${copy.line2}</p>
+        <p style="color: #B04A2C; font-size: 14px;">${copy.line3}</p>
+        <div style="text-align: center; margin: 30px 0;">
+          <a href="${url}" style="background-color: #D9704F; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold;">${copy.cta}</a>
+        </div>
+      `
+    })
+  };
+};
+
+/**
+ * Alerte envoyée à l'administrateur lorsqu'un acheteur a dépassé 80% du délai
+ * pour l'étape de paiement du véhicule (étape 2).
+ */
+const adminLatePaymentAlertEmail = ({ vehicleLabel, buyerName, buyerEmail, saleId, remainingMs }) => {
+  const url = `${process.env.ADMIN_URL || 'http://localhost:3002'}/ventes`;
+  const remainingHours = Math.max(0, Math.round(remainingMs / (1000 * 60 * 60)));
+
+  return {
+    subject: `ALERTE : Paiement véhicule en retard (${vehicleLabel})`,
+    text: `Le paiement pour le véhicule ${vehicleLabel} par l'acheteur ${buyerName} (${buyerEmail}) n'a toujours pas été reçu. Il ne reste que ${remainingHours} heures avant l'annulation automatique. Consultez la vente : ${url}`,
+    html: layout({
+      heading: 'Alerte : Paiement Critique',
+      footer: 'Système de supervision DealAutoPro',
+      body: `
+        <p style="color: #1A2230; font-size: 16px;">Bonjour,</p>
+        <p style="color: #5A5E66; font-size: 14px;">Une vente nécessite potentiellement votre attention.</p>
+        <div style="background-color: #fff7f1; border-left: 4px solid #B04A2C; padding: 15px; margin: 20px 0;">
+          <p style="margin: 0 0 10px 0;"><strong>Véhicule :</strong> ${vehicleLabel}</p>
+          <p style="margin: 0 0 10px 0;"><strong>Acheteur :</strong> ${buyerName} (${buyerEmail})</p>
+          <p style="margin: 0; color: #B04A2C; font-weight: bold;">Le délai autorisé a dépassé les 80%.</p>
+          <p style="margin: 5px 0 0 0;">Temps restant avant annulation automatique : ~${remainingHours} heure(s).</p>
+        </div>
+        <p style="color: #5A5E66; font-size: 14px;">Vous pouvez contacter l'acheteur ou préparer la réattribution de cette vente.</p>
+        <div style="text-align: center; margin: 30px 0;">
+          <a href="${url}" style="background-color: #B04A2C; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold;">Voir les ventes</a>
+        </div>
+      `
+    })
+  };
+};
+
+/**
+ * Information envoyée à l'acheteur écarté : le délai de l'étape est dépassé,
+ * le véhicule passe au candidat suivant de la liste d'attente.
+ */
+const saleWinnerRemovedEmail = ({ user, brand, model, year, photoUrl, sessionName, stepKey }) => {
+  const lang = normalizeLanguage(user.language);
+  const vehicleLabel = [brand, model].filter(Boolean).join(' ') || (lang === 'fr' ? 'Véhicule' : 'Vehicle');
+  const stepLabel = STEP_LABELS[lang][stepKey] || stepKey;
+
+  const copy = {
+    fr: {
+      subject: `Vous avez perdu l'attribution de ${vehicleLabel} - DealAutoPro`,
+      heading: 'Attribution retirée',
+      hello: `Bonjour ${user.firstName} ${user.lastName},`,
+      subtitle: [year ? `Année ${year}` : null, sessionName].filter(Boolean).join(' · '),
+      line1: `Le délai imparti pour l'étape « ${stepLabel} » est écoulé sans que celle-ci ait été finalisée.`,
+      line2: 'L\'attribution de ce véhicule vous a donc été retirée : il est proposé à l\'offre suivante.',
+      line3: 'Vous pouvez continuer à déposer des offres sur les véhicules des sessions en cours.',
+      text: `Le délai de l'étape « ${stepLabel} » est écoulé : l'attribution de ${vehicleLabel} vous a été retirée et le véhicule est proposé à l'offre suivante.`,
+      footer: "L'équipe DealAutoPro"
+    },
+    en: {
+      subject: `You lost the award for ${vehicleLabel} - DealAutoPro`,
+      heading: 'Award withdrawn',
+      hello: `Hello ${user.firstName} ${user.lastName},`,
+      subtitle: [year ? `Year ${year}` : null, sessionName].filter(Boolean).join(' · '),
+      line1: `The deadline for the "${stepLabel}" step has passed without it being completed.`,
+      line2: 'This vehicle has therefore been withdrawn from you and offered to the next bidder.',
+      line3: 'You can keep bidding on vehicles in the current sessions.',
+      text: `The "${stepLabel}" deadline has passed: ${vehicleLabel} has been withdrawn from you and offered to the next bidder.`,
+      footer: 'The DealAutoPro team'
+    }
+  }[lang];
+
+  return {
+    subject: copy.subject,
+    text: copy.text,
+    html: layout({
+      heading: copy.heading,
+      footer: copy.footer,
+      body: `
+        <p style="color: #1A2230; font-size: 16px;">${copy.hello}</p>
+        ${vehicleCard(photoUrl, vehicleLabel, copy.subtitle)}
+        <p style="color: #B04A2C; font-size: 14px; font-weight: bold;">${copy.line1}</p>
+        <p style="color: #5A5E66; font-size: 14px;">${copy.line2}</p>
+        <p style="color: #5A5E66; font-size: 14px;">${copy.line3}</p>
+      `
+    })
+  };
+};
+
+/**
+ * Information envoyée au vendeur à la clôture de la session : son véhicule a trouvé
+ * un gagnant, dans l'attente que celui-ci confirme sa procédure d'achat.
+ */
+/**
+ * Enchère clôturée sans preneur : le prix de réserve n'a pas été atteint.
+ *
+ * Le vendeur reçoit la meilleure offre reçue quand il y en a eu une — c'est l'information
+ * qui lui permet de décider s'il republie au même prix de réserve ou plus bas. Sans aucune
+ * offre, le message le dit franchement plutôt que d'afficher un montant vide.
+ */
+const saleUnsoldSellerEmail = ({ user, brand, model, year, photoUrl, sessionName, reservePrice, bestOffer, offerCount }) => {
+  const lang = normalizeLanguage(user.language);
+  const locale = lang === 'fr' ? 'fr-FR' : 'en-GB';
+  const url = `${CLIENT_BASE_URL}${SELLER_SALES_PATH[lang]}`;
+  const vehicleLabel = [brand, model].filter(Boolean).join(' ') || (lang === 'fr' ? 'Véhicule' : 'Vehicle');
+  const hasOffers = Number(offerCount) > 0 && Number.isFinite(Number(bestOffer));
+  const best = hasOffers ? Number(bestOffer).toLocaleString(locale) : null;
+  const reserve = Number.isFinite(Number(reservePrice)) ? Number(reservePrice).toLocaleString(locale) : null;
+
+  const copy = {
+    fr: {
+      subject: `Enchère clôturée : ${vehicleLabel} n'a pas trouvé preneur - DealAutoPro`,
+      heading: 'Votre véhicule n\'a pas trouvé preneur',
+      hello: `Bonjour ${user.firstName} ${user.lastName},`,
+      subtitle: [year ? `Année ${year}` : null, sessionName].filter(Boolean).join(' · '),
+      line1: `L'enchère sur votre véhicule est clôturée à l'issue de ${sessionName}. Le prix de réserve n'a pas été atteint : aucun acheteur n'a été désigné.`,
+      offersLabel: hasOffers
+        ? `Meilleure offre reçue (${offerCount} offre${Number(offerCount) > 1 ? 's' : ''})`
+        : 'Offres reçues',
+      offersValue: hasOffers ? `${best} €` : 'Aucune offre',
+      reserveLabel: 'Votre prix de réserve',
+      line2: hasOffers
+        ? 'Les offres reçues sont restées sous votre prix de réserve. Vous pouvez republier le véhicule dans une prochaine session, en ajustant si besoin ce prix.'
+        : 'Aucune offre n\'a été déposée pendant cette session. Vous pouvez republier le véhicule dans une prochaine session.',
+      line3: 'Votre véhicule est de nouveau disponible : contactez-nous pour le replacer en vente.',
+      cta: 'Suivre mes ventes',
+      text: `L'enchère sur ${vehicleLabel} est clôturée (${sessionName}) sans atteindre le prix de réserve${reserve ? ` de ${reserve} €` : ''}. ${hasOffers ? `Meilleure offre reçue : ${best} €.` : 'Aucune offre reçue.'} ${url}`,
+      footer: "L'équipe DealAutoPro"
+    },
+    en: {
+      subject: `Auction closed: ${vehicleLabel} found no buyer - DealAutoPro`,
+      heading: 'Your vehicle found no buyer',
+      hello: `Hello ${user.firstName} ${user.lastName},`,
+      subtitle: [year ? `Year ${year}` : null, sessionName].filter(Boolean).join(' · '),
+      line1: `The auction on your vehicle closed at the end of ${sessionName}. The reserve price was not met, so no buyer was appointed.`,
+      offersLabel: hasOffers
+        ? `Highest bid received (${offerCount} bid${Number(offerCount) > 1 ? 's' : ''})`
+        : 'Bids received',
+      offersValue: hasOffers ? `€${best}` : 'No bid',
+      reserveLabel: 'Your reserve price',
+      line2: hasOffers
+        ? 'The bids received stayed below your reserve price. You can relist the vehicle in a future session, adjusting that price if needed.'
+        : 'No bid was placed during this session. You can relist the vehicle in a future session.',
+      line3: 'Your vehicle is available again: contact us to put it back up for sale.',
+      cta: 'Track my sales',
+      text: `The auction on ${vehicleLabel} closed (${sessionName}) without meeting the reserve price${reserve ? ` of €${reserve}` : ''}. ${hasOffers ? `Highest bid received: €${best}.` : 'No bid received.'} ${url}`,
+      footer: 'The DealAutoPro team'
+    }
+  }[lang];
+
+  return {
+    subject: copy.subject,
+    text: copy.text,
+    html: layout({
+      heading: copy.heading,
+      footer: copy.footer,
+      body: `
+        <p style="color: #1A2230; font-size: 16px;">${copy.hello}</p>
+        ${vehicleCard(photoUrl, vehicleLabel, copy.subtitle)}
+        <p style="color: #5A5E66; font-size: 14px;">${copy.line1}</p>
+        <div style="background-color: #FFFFFF; border: 1px solid #DCD7CB; border-radius: 8px; padding: 16px; text-align: center; margin: 18px 0;">
+          <div style="color: #5A5E66; font-size: 11px; text-transform: uppercase; letter-spacing: 1px;">${copy.offersLabel}</div>
+          <div style="color: #13243C; font-size: 26px; font-weight: bold; margin-top: 6px;">${copy.offersValue}</div>
+          ${reserve ? `<div style="color: #5A5E66; font-size: 12px; margin-top: 10px;">${copy.reserveLabel} : <strong style="color: #13243C;">${reserve} €</strong></div>` : ''}
+        </div>
+        <p style="color: #5A5E66; font-size: 14px;">${copy.line2}</p>
+        <p style="color: #5A5E66; font-size: 14px;">${copy.line3}</p>
+        <div style="text-align: center; margin: 30px 0;">
+          <a href="${url}" style="background-color: #13243C; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold;">${copy.cta}</a>
+        </div>
+      `
+    })
+  };
+};
+
+const saleAwardedSellerEmail = ({ user, brand, model, year, photoUrl, sessionName, amount, saleId }) => {
+  const lang = normalizeLanguage(user.language);
+  const locale = lang === 'fr' ? 'fr-FR' : 'en-GB';
+  const url = `${CLIENT_BASE_URL}${SELLER_SALES_PATH[lang]}`;
+  const vehicleLabel = [brand, model].filter(Boolean).join(' ') || (lang === 'fr' ? 'Véhicule' : 'Vehicle');
+  const price = Number(amount).toLocaleString(locale);
+
+  const copy = {
+    fr: {
+      subject: `Enchère clôturée : ${vehicleLabel} a trouvé preneur - DealAutoPro`,
+      heading: 'Votre véhicule a trouvé preneur',
+      hello: `Bonjour ${user.firstName} ${user.lastName},`,
+      subtitle: [year ? `Année ${year}` : null, sessionName].filter(Boolean).join(' · '),
+      line1: `L'enchère sur votre véhicule est clôturée à l'issue de ${sessionName}.`,
+      offerLabel: 'Meilleure offre retenue',
+      line2: 'En attente de confirmation de l\'acheteur : il doit maintenant régler la commission plateforme pour engager la procédure d\'achat.',
+      line3: 'Vous serez averti dès qu\'une action sera attendue de votre part.',
+      cta: 'Suivre mes ventes',
+      text: `L'enchère sur ${vehicleLabel} est clôturée (${sessionName}). Meilleure offre retenue : ${price} €. En attente de confirmation de l'acheteur. ${url}`,
+      footer: "L'équipe DealAutoPro"
+    },
+    en: {
+      subject: `Auction closed: ${vehicleLabel} found a buyer - DealAutoPro`,
+      heading: 'Your vehicle found a buyer',
+      hello: `Hello ${user.firstName} ${user.lastName},`,
+      subtitle: [year ? `Year ${year}` : null, sessionName].filter(Boolean).join(' · '),
+      line1: `The auction on your vehicle closed at the end of ${sessionName}.`,
+      offerLabel: 'Winning bid',
+      line2: 'Awaiting the buyer\'s confirmation: they must now pay the platform commission to start the purchase procedure.',
+      line3: 'You will be notified as soon as an action is required from you.',
+      cta: 'Track my sales',
+      text: `The auction on ${vehicleLabel} closed (${sessionName}). Winning bid: €${price}. Awaiting the buyer's confirmation. ${url}`,
+      footer: 'The DealAutoPro team'
+    }
+  }[lang];
+
+  return {
+    subject: copy.subject,
+    text: copy.text,
+    html: layout({
+      heading: copy.heading,
+      footer: copy.footer,
+      body: `
+        <p style="color: #1A2230; font-size: 16px;">${copy.hello}</p>
+        ${vehicleCard(photoUrl, vehicleLabel, copy.subtitle)}
+        <p style="color: #5A5E66; font-size: 14px;">${copy.line1}</p>
+        <div style="background-color: #FFFFFF; border: 1px solid #DCD7CB; border-radius: 8px; padding: 16px; text-align: center; margin: 18px 0;">
+          <div style="color: #5A5E66; font-size: 11px; text-transform: uppercase; letter-spacing: 1px;">${copy.offerLabel}</div>
+          <div style="color: #13243C; font-size: 26px; font-weight: bold; margin-top: 6px;">${price} €</div>
+        </div>
+        <p style="color: #B3893F; font-size: 14px; font-weight: bold;">${copy.line2}</p>
+        <p style="color: #5A5E66; font-size: 14px;">${copy.line3}</p>
+        <div style="text-align: center; margin: 30px 0;">
+          <a href="${url}" style="background-color: #13243C; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold;">${copy.cta}</a>
+        </div>
+      `
+    })
+  };
+};
+
+/**
+ * Prévenir le vendeur que l'acheteur a réglé la commission : le virement est désormais
+ * attendu sur son compte, et c'est à lui d'en confirmer la réception depuis son espace.
+ */
+const saleCommissionPaidSellerEmail = ({ user, brand, model, year, photoUrl, sessionName, amount, saleId, deadlineHours }) => {
+  const lang = normalizeLanguage(user.language);
+  const locale = lang === 'fr' ? 'fr-FR' : 'en-GB';
+  const url = `${CLIENT_BASE_URL}${SELLER_SALES_PATH[lang]}/${saleId}`;
+  const vehicleLabel = [brand, model].filter(Boolean).join(' ') || (lang === 'fr' ? 'Véhicule' : 'Vehicle');
+  const price = Number(amount).toLocaleString(locale);
+  const delay = formatDeadline(deadlineHours, lang);
+
+  const copy = {
+    fr: {
+      subject: `L'acheteur a confirmé son achat de ${vehicleLabel} - DealAutoPro`,
+      heading: "L'acheteur a confirmé son achat",
+      hello: `Bonjour ${user.firstName} ${user.lastName},`,
+      subtitle: [year ? `Année ${year}` : null, sessionName].filter(Boolean).join(' · '),
+      line1: `L'acheteur a réglé la commission plateforme et confirmé son achat de « ${vehicleLabel} ».`,
+      offerLabel: 'Virement attendu sur votre compte',
+      line2: `Il dispose de ${delay} pour effectuer le virement sur votre compte bancaire.`,
+      line3: 'Dès que les fonds seront crédités, merci de confirmer la réception du virement depuis votre espace : c\'est cette confirmation qui fait avancer la vente.',
+      cta: 'Confirmer la réception du virement',
+      text: `L'acheteur a réglé la commission et confirmé son achat de ${vehicleLabel}. Un virement de ${price} € est attendu sur votre compte sous ${delay}. Confirmez sa réception depuis votre espace : ${url}`,
+      footer: "L'équipe DealAutoPro"
+    },
+    en: {
+      subject: `The buyer confirmed their purchase of ${vehicleLabel} - DealAutoPro`,
+      heading: 'The buyer confirmed their purchase',
+      hello: `Hello ${user.firstName} ${user.lastName},`,
+      subtitle: [year ? `Year ${year}` : null, sessionName].filter(Boolean).join(' · '),
+      line1: `The buyer has paid the platform commission and confirmed their purchase of "${vehicleLabel}".`,
+      offerLabel: 'Transfer expected on your account',
+      line2: `They have ${delay} to transfer the funds to your bank account.`,
+      line3: 'As soon as the funds are credited, please confirm you received the transfer from your workspace: that confirmation is what moves the sale forward.',
+      cta: 'Confirm I received the transfer',
+      text: `The buyer paid the commission and confirmed their purchase of ${vehicleLabel}. A transfer of €${price} is expected within ${delay}. Confirm receipt from your workspace: ${url}`,
+      footer: 'The DealAutoPro team'
+    }
+  }[lang];
+
+  return {
+    subject: copy.subject,
+    text: copy.text,
+    html: layout({
+      heading: copy.heading,
+      footer: copy.footer,
+      body: `
+        <p style="color: #1A2230; font-size: 16px;">${copy.hello}</p>
+        ${vehicleCard(photoUrl, vehicleLabel, copy.subtitle)}
+        <p style="color: #5A5E66; font-size: 14px;">${copy.line1}</p>
+        <div style="background-color: #FFFFFF; border: 1px solid #DCD7CB; border-radius: 8px; padding: 16px; text-align: center; margin: 18px 0;">
+          <div style="color: #5A5E66; font-size: 11px; text-transform: uppercase; letter-spacing: 1px;">${copy.offerLabel}</div>
+          <div style="color: #13243C; font-size: 26px; font-weight: bold; margin-top: 6px;">${price} €</div>
+        </div>
+        <p style="color: #B3893F; font-size: 14px; font-weight: bold;">${copy.line2}</p>
+        <p style="color: #5A5E66; font-size: 14px;">${copy.line3}</p>
+        <div style="text-align: center; margin: 30px 0;">
+          <a href="${url}" style="background-color: #2F6F4F; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold;">${copy.cta}</a>
+        </div>
+      `
+    })
+  };
+};
+
+/**
+ * Prévenir l'acheteur que le certificat de cession est prêt : il doit le télécharger,
+ * le signer et le tamponner, puis le redéposer sur la plateforme.
+ */
+const saleCertificateReadyEmail = ({ user, brand, model, year, photoUrl, sessionName, saleId }) => {
+  const lang = normalizeLanguage(user.language);
+  const url = `${CLIENT_BASE_URL}${WON_SALE_PATH[lang]}/${saleId}`;
+  const vehicleLabel = [brand, model].filter(Boolean).join(' ') || (lang === 'fr' ? 'Véhicule' : 'Vehicle');
+
+  const copy = {
+    fr: {
+      subject: `Votre certificat de cession est prêt — ${vehicleLabel} - DealAutoPro`,
+      heading: 'Votre certificat de cession est prêt',
+      hello: `Bonjour ${user.firstName} ${user.lastName},`,
+      subtitle: [year ? `Année ${year}` : null, sessionName].filter(Boolean).join(' · '),
+      line1: 'Le vendeur a confirmé avoir reçu votre virement. Le certificat de cession du véhicule a été généré et rattaché à votre vente.',
+      line2: 'Il vous reste à le <strong>télécharger</strong>, le <strong>signer</strong> et le <strong>tamponner</strong>, puis à le <strong>redéposer</strong> sur la plateforme.',
+      line3: 'Rendez-vous à l\'étape 3 de votre procédure d\'achat : vous y trouverez le document et l\'espace de dépôt.',
+      cta: 'Télécharger et déposer le certificat',
+      text: `Le vendeur a confirmé la réception de votre virement. Votre certificat de cession pour ${vehicleLabel} est prêt : téléchargez-le, signez-le, tamponnez-le puis redéposez-le sur la plateforme. ${url}`,
+      footer: "L'équipe DealAutoPro"
+    },
+    en: {
+      subject: `Your transfer certificate is ready — ${vehicleLabel} - DealAutoPro`,
+      heading: 'Your transfer certificate is ready',
+      hello: `Hello ${user.firstName} ${user.lastName},`,
+      subtitle: [year ? `Year ${year}` : null, sessionName].filter(Boolean).join(' · '),
+      line1: 'The seller confirmed receiving your transfer. The vehicle transfer certificate has been generated and attached to your sale.',
+      line2: 'You now need to <strong>download</strong> it, <strong>sign</strong> and <strong>stamp</strong> it, then <strong>upload</strong> it back to the platform.',
+      line3: 'Go to step 3 of your purchase: the document and the upload area are waiting there.',
+      cta: 'Download and upload the certificate',
+      text: `The seller confirmed receiving your transfer. Your transfer certificate for ${vehicleLabel} is ready: download it, sign and stamp it, then upload it back. ${url}`,
+      footer: 'The DealAutoPro team'
+    }
+  }[lang];
+
+  return {
+    subject: copy.subject,
+    text: copy.text,
+    html: layout({
+      heading: copy.heading,
+      footer: copy.footer,
+      body: `
+        <p style="color: #1A2230; font-size: 16px;">${copy.hello}</p>
+        ${vehicleCard(photoUrl, vehicleLabel, copy.subtitle)}
+        <p style="color: #5A5E66; font-size: 14px;">${copy.line1}</p>
+        <p style="color: #13243C; font-size: 14px;">${copy.line2}</p>
+        <p style="color: #5A5E66; font-size: 14px;">${copy.line3}</p>
+        <div style="text-align: center; margin: 30px 0;">
+          <a href="${url}" style="background-color: #D9704F; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold;">${copy.cta}</a>
+        </div>
+      `
+    })
+  };
+};
+
+/**
+ * Prévenir le vendeur que l'acheteur a redéposé le certificat signé : il doit le vérifier
+ * et confirmer qu'il est bien signé et tamponné.
+ */
+const saleSignedCertificateSellerEmail = ({ user, brand, model, year, photoUrl, sessionName, saleId }) => {
+  const lang = normalizeLanguage(user.language);
+  const url = `${CLIENT_BASE_URL}${SELLER_SALES_PATH[lang]}/${saleId}`;
+  const vehicleLabel = [brand, model].filter(Boolean).join(' ') || (lang === 'fr' ? 'Véhicule' : 'Vehicle');
+
+  const copy = {
+    fr: {
+      subject: `Certificat signé à vérifier — ${vehicleLabel} - DealAutoPro`,
+      heading: 'Le certificat signé attend votre vérification',
+      hello: `Bonjour ${user.firstName} ${user.lastName},`,
+      subtitle: [year ? `Année ${year}` : null, sessionName].filter(Boolean).join(' · '),
+      line1: `L'acheteur a déposé le certificat de cession de « ${vehicleLabel} », signé et tamponné.`,
+      line2: 'Consultez le document depuis votre espace et confirmez qu\'il est bien signé et tamponné.',
+      line3: 'Votre confirmation déclenche la suite de la procédure : la génération du mandat d\'enlèvement.',
+      cta: 'Vérifier le certificat',
+      text: `L'acheteur a déposé le certificat de cession signé et tamponné pour ${vehicleLabel}. Consultez-le et confirmez-le depuis votre espace : ${url}`,
+      footer: "L'équipe DealAutoPro"
+    },
+    en: {
+      subject: `Signed certificate to review — ${vehicleLabel} - DealAutoPro`,
+      heading: 'The signed certificate is waiting for your review',
+      hello: `Hello ${user.firstName} ${user.lastName},`,
+      subtitle: [year ? `Year ${year}` : null, sessionName].filter(Boolean).join(' · '),
+      line1: `The buyer uploaded the transfer certificate for "${vehicleLabel}", signed and stamped.`,
+      line2: 'Open the document from your workspace and confirm it is properly signed and stamped.',
+      line3: 'Your confirmation triggers the next step: generating the collection mandate.',
+      cta: 'Review the certificate',
+      text: `The buyer uploaded the signed and stamped transfer certificate for ${vehicleLabel}. Review and confirm it from your workspace: ${url}`,
+      footer: 'The DealAutoPro team'
+    }
+  }[lang];
+
+  return {
+    subject: copy.subject,
+    text: copy.text,
+    html: layout({
+      heading: copy.heading,
+      footer: copy.footer,
+      body: `
+        <p style="color: #1A2230; font-size: 16px;">${copy.hello}</p>
+        ${vehicleCard(photoUrl, vehicleLabel, copy.subtitle)}
+        <p style="color: #5A5E66; font-size: 14px;">${copy.line1}</p>
+        <p style="color: #13243C; font-size: 14px; font-weight: bold;">${copy.line2}</p>
+        <p style="color: #5A5E66; font-size: 14px;">${copy.line3}</p>
+        <div style="text-align: center; margin: 30px 0;">
+          <a href="${url}" style="background-color: #2F6F4F; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold;">${copy.cta}</a>
+        </div>
+      `
+    })
+  };
+};
+
+// Libellés des motifs de refus d'un certificat signé (miroir du modèle Sale)
+const REJECTION_REASON_LABELS = {
+  fr: {
+    tampon_manquant: 'Cachet manquant ou illisible',
+    document_illisible: 'Document flou ou illisible',
+    signature_manquante: 'Signature manquante',
+    document_incomplet: 'Document incomplet (page manquante)',
+    mauvais_document: 'Ce n’est pas le bon document',
+    autre: 'Autre motif',
+  },
+  en: {
+    tampon_manquant: 'Missing or unreadable stamp',
+    document_illisible: 'Blurry or unreadable document',
+    signature_manquante: 'Missing signature',
+    document_incomplet: 'Incomplete document (missing page)',
+    mauvais_document: 'This is not the right document',
+    autre: 'Other reason',
+  },
+};
+
+const rejectionBlock = (reasonLabel, comment, labels) => `
+  <div style="background-color: #FDECE4; border-left: 4px solid #D9704F; padding: 14px 16px; margin: 18px 0;">
+    <div style="color: #B04A2C; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; font-weight: bold;">${labels.reason}</div>
+    <div style="color: #13243C; font-size: 15px; font-weight: bold; margin-top: 4px;">${reasonLabel}</div>
+    ${comment ? `<div style="color: #5A5E66; font-size: 13px; margin-top: 8px;"><em>${labels.comment} :</em> ${comment}</div>` : ''}
+  </div>
+`;
+
+/**
+ * Prévenir l'acheteur que le certificat qu'il a déposé a été refusé par le vendeur,
+ * avec le motif, et qu'il doit en redéposer un nouveau.
+ */
+const saleCertificateRejectedBuyerEmail = ({ user, brand, model, year, photoUrl, sessionName, saleId, reason, comment }) => {
+  const lang = normalizeLanguage(user.language);
+  const url = `${CLIENT_BASE_URL}${WON_SALE_PATH[lang]}/${saleId}`;
+  const vehicleLabel = [brand, model].filter(Boolean).join(' ') || (lang === 'fr' ? 'Véhicule' : 'Vehicle');
+  const reasonLabel = REJECTION_REASON_LABELS[lang][reason] || reason;
+
+  const copy = {
+    fr: {
+      subject: `Certificat refusé — ${vehicleLabel} - DealAutoPro`,
+      heading: 'Votre certificat doit être redéposé',
+      hello: `Bonjour ${user.firstName} ${user.lastName},`,
+      subtitle: [year ? `Année ${year}` : null, sessionName].filter(Boolean).join(' · '),
+      line1: `Le vendeur a examiné le certificat de cession que vous avez déposé pour « ${vehicleLabel} » et ne peut pas le valider en l'état.`,
+      line2: 'Merci de corriger ce point, puis de redéposer le document signé et tamponné depuis votre espace.',
+      labels: { reason: 'Motif du refus', comment: 'Précision du vendeur' },
+      cta: 'Redéposer le certificat',
+      text: `Le vendeur a refusé le certificat déposé pour ${vehicleLabel}. Motif : ${reasonLabel}.${comment ? ` Précision : ${comment}.` : ''} Redéposez le document depuis votre espace : ${url}`,
+      footer: "L'équipe DealAutoPro"
+    },
+    en: {
+      subject: `Certificate rejected — ${vehicleLabel} - DealAutoPro`,
+      heading: 'Your certificate needs to be uploaded again',
+      hello: `Hello ${user.firstName} ${user.lastName},`,
+      subtitle: [year ? `Year ${year}` : null, sessionName].filter(Boolean).join(' · '),
+      line1: `The seller reviewed the transfer certificate you uploaded for "${vehicleLabel}" and cannot validate it as it stands.`,
+      line2: 'Please fix this point, then upload the signed and stamped document again from your workspace.',
+      labels: { reason: 'Rejection reason', comment: 'Seller note' },
+      cta: 'Upload the certificate again',
+      text: `The seller rejected the certificate uploaded for ${vehicleLabel}. Reason: ${reasonLabel}.${comment ? ` Note: ${comment}.` : ''} Upload it again from your workspace: ${url}`,
+      footer: 'The DealAutoPro team'
+    }
+  }[lang];
+
+  return {
+    subject: copy.subject,
+    text: copy.text,
+    html: layout({
+      heading: copy.heading,
+      footer: copy.footer,
+      body: `
+        <p style="color: #1A2230; font-size: 16px;">${copy.hello}</p>
+        ${vehicleCard(photoUrl, vehicleLabel, copy.subtitle)}
+        <p style="color: #5A5E66; font-size: 14px;">${copy.line1}</p>
+        ${rejectionBlock(reasonLabel, comment, copy.labels)}
+        <p style="color: #5A5E66; font-size: 14px;">${copy.line2}</p>
+        <div style="text-align: center; margin: 30px 0;">
+          <a href="${url}" style="background-color: #D9704F; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold;">${copy.cta}</a>
+        </div>
+      `
+    })
+  };
+};
+
+/**
+ * Informer l'administration qu'un certificat a été refusé, pour qu'elle puisse
+ * intervenir si l'échange se bloque entre les deux parties.
+ */
+const saleCertificateRejectedAdminEmail = ({ user, vehicleLabel, sessionName, sellerName, buyerName, reason, comment }) => {
+  const lang = normalizeLanguage(user?.language);
+  const reasonLabel = REJECTION_REASON_LABELS[lang][reason] || reason;
+
+  const copy = {
+    fr: {
+      subject: `[Admin] Certificat refusé — ${vehicleLabel} - DealAutoPro`,
+      heading: 'Certificat de cession refusé',
+      line1: `Le vendeur <strong>${sellerName}</strong> a refusé le certificat déposé par l'acheteur <strong>${buyerName}</strong>.`,
+      line2: `Véhicule : ${vehicleLabel}${sessionName ? ` — ${sessionName}` : ''}.`,
+      line3: 'L\'acheteur a été invité à redéposer un document conforme. Aucune action n\'est requise de votre part pour l\'instant.',
+      labels: { reason: 'Motif du refus', comment: 'Précision du vendeur' },
+      text: `Certificat refusé. Vendeur : ${sellerName}. Acheteur : ${buyerName}. Véhicule : ${vehicleLabel}. Motif : ${reasonLabel}.${comment ? ` Précision : ${comment}.` : ''}`,
+      footer: 'Notification automatique DealAutoPro'
+    },
+    en: {
+      subject: `[Admin] Certificate rejected — ${vehicleLabel} - DealAutoPro`,
+      heading: 'Transfer certificate rejected',
+      line1: `Seller <strong>${sellerName}</strong> rejected the certificate uploaded by buyer <strong>${buyerName}</strong>.`,
+      line2: `Vehicle: ${vehicleLabel}${sessionName ? ` — ${sessionName}` : ''}.`,
+      line3: 'The buyer has been asked to upload a compliant document. No action is required from you for now.',
+      labels: { reason: 'Rejection reason', comment: 'Seller note' },
+      text: `Certificate rejected. Seller: ${sellerName}. Buyer: ${buyerName}. Vehicle: ${vehicleLabel}. Reason: ${reasonLabel}.${comment ? ` Note: ${comment}.` : ''}`,
+      footer: 'Automatic DealAutoPro notification'
+    }
+  }[lang];
+
+  return {
+    subject: copy.subject,
+    text: copy.text,
+    html: layout({
+      heading: copy.heading,
+      footer: copy.footer,
+      body: `
+        <p style="color: #5A5E66; font-size: 14px;">${copy.line1}</p>
+        <p style="color: #5A5E66; font-size: 14px;">${copy.line2}</p>
+        ${rejectionBlock(reasonLabel, comment, copy.labels)}
+        <p style="color: #5A5E66; font-size: 14px;">${copy.line3}</p>
+      `
+    })
+  };
+};
+
+/**
+ * Prévenir l'acheteur que la remise du véhicule peut avoir lieu : la déclaration d'achat
+ * est disponible et son code de remise l'attend dans son espace.
+ * Le code lui-même n'est volontairement pas transmis par e-mail.
+ */
+const saleHandoverReadyBuyerEmail = ({ user, brand, model, year, photoUrl, sessionName, saleId }) => {
+  const lang = normalizeLanguage(user.language);
+  const url = `${CLIENT_BASE_URL}${WON_SALE_PATH[lang]}/${saleId}`;
+  const vehicleLabel = [brand, model].filter(Boolean).join(' ') || (lang === 'fr' ? 'Véhicule' : 'Vehicle');
+
+  const copy = {
+    fr: {
+      subject: `Votre véhicule est prêt à être enlevé — ${vehicleLabel} - DealAutoPro`,
+      heading: 'Vous pouvez récupérer votre véhicule',
+      hello: `Bonjour ${user.firstName} ${user.lastName},`,
+      subtitle: [year ? `Année ${year}` : null, sessionName].filter(Boolean).join(' · '),
+      line1: `Le vendeur a validé le certificat de cession. La dernière étape est l'enlèvement de « ${vehicleLabel} ».`,
+      line2: 'Votre <strong>déclaration d\'achat</strong> est disponible au téléchargement dans votre espace, accompagnée d\'un <strong>code de remise</strong>.',
+      line3: 'Par sécurité, ce code n\'est pas transmis par e-mail : retrouvez-le dans votre espace et communiquez-le au vendeur uniquement au moment où vous récupérez le véhicule. Sa saisie clôture la vente.',
+      cta: 'Voir mon code de remise',
+      text: `Le vendeur a validé le certificat de cession. Votre déclaration d'achat et votre code de remise pour ${vehicleLabel} vous attendent dans votre espace. Ne communiquez le code au vendeur qu'au moment de l'enlèvement : ${url}`,
+      footer: "L'équipe DealAutoPro"
+    },
+    en: {
+      subject: `Your vehicle is ready for collection — ${vehicleLabel} - DealAutoPro`,
+      heading: 'You can collect your vehicle',
+      hello: `Hello ${user.firstName} ${user.lastName},`,
+      subtitle: [year ? `Year ${year}` : null, sessionName].filter(Boolean).join(' · '),
+      line1: `The seller validated the transfer certificate. The last step is collecting "${vehicleLabel}".`,
+      line2: 'Your <strong>purchase declaration</strong> is ready to download in your workspace, along with a <strong>handover code</strong>.',
+      line3: 'For security, the code is not sent by email: find it in your workspace and give it to the seller only when you collect the vehicle. Entering it closes the sale.',
+      cta: 'View my handover code',
+      text: `The seller validated the transfer certificate. Your purchase declaration and handover code for ${vehicleLabel} are waiting in your workspace. Only give the code to the seller at collection: ${url}`,
+      footer: 'The DealAutoPro team'
+    }
+  }[lang];
+
+  return {
+    subject: copy.subject,
+    text: copy.text,
+    html: layout({
+      heading: copy.heading,
+      footer: copy.footer,
+      body: `
+        <p style="color: #1A2230; font-size: 16px;">${copy.hello}</p>
+        ${vehicleCard(photoUrl, vehicleLabel, copy.subtitle)}
+        <p style="color: #5A5E66; font-size: 14px;">${copy.line1}</p>
+        <p style="color: #13243C; font-size: 14px;">${copy.line2}</p>
+        <p style="color: #B04A2C; font-size: 14px;">${copy.line3}</p>
+        <div style="text-align: center; margin: 30px 0;">
+          <a href="${url}" style="background-color: #D9704F; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold;">${copy.cta}</a>
+        </div>
+      `
+    })
+  };
+};
+
+/**
+ * Confirmer à l'une des deux parties que la vente est clôturée après l'enlèvement.
+ * `role` choisit la formulation et le lien : 'acheteur' ou 'vendeur'.
+ */
+const saleClosedEmail = ({ user, role, brand, model, year, photoUrl, sessionName, saleId }) => {
+  const lang = normalizeLanguage(user.language);
+  const isBuyer = role === 'acheteur';
+  const url = isBuyer
+    ? `${CLIENT_BASE_URL}${WON_SALE_PATH[lang]}/${saleId}`
+    : `${CLIENT_BASE_URL}${SELLER_SALES_PATH[lang]}/${saleId}`;
+  const vehicleLabel = [brand, model].filter(Boolean).join(' ') || (lang === 'fr' ? 'Véhicule' : 'Vehicle');
+
+  const copy = {
+    fr: {
+      subject: `Vente clôturée — ${vehicleLabel} - DealAutoPro`,
+      heading: 'La vente est clôturée',
+      hello: `Bonjour ${user.firstName} ${user.lastName},`,
+      subtitle: [year ? `Année ${year}` : null, sessionName].filter(Boolean).join(' · '),
+      line1: isBuyer
+        ? `L'enlèvement de « ${vehicleLabel} » a été confirmé par le vendeur. La transaction est terminée.`
+        : `Vous avez confirmé la remise de « ${vehicleLabel} ». La transaction est terminée.`,
+      line2: 'Vos documents restent accessibles depuis votre espace : certificat de cession et déclaration d\'achat.',
+      cta: 'Voir mes documents',
+      text: isBuyer
+        ? `L'enlèvement de ${vehicleLabel} a été confirmé par le vendeur : la vente est clôturée. Vos documents restent accessibles : ${url}`
+        : `Vous avez confirmé la remise de ${vehicleLabel} : la vente est clôturée. Vos documents restent accessibles : ${url}`,
+      footer: "L'équipe DealAutoPro"
+    },
+    en: {
+      subject: `Sale completed — ${vehicleLabel} - DealAutoPro`,
+      heading: 'The sale is complete',
+      hello: `Hello ${user.firstName} ${user.lastName},`,
+      subtitle: [year ? `Year ${year}` : null, sessionName].filter(Boolean).join(' · '),
+      line1: isBuyer
+        ? `The seller confirmed the collection of "${vehicleLabel}". The transaction is complete.`
+        : `You confirmed handing over "${vehicleLabel}". The transaction is complete.`,
+      line2: 'Your documents remain available in your workspace: transfer certificate and purchase declaration.',
+      cta: 'View my documents',
+      text: isBuyer
+        ? `The seller confirmed the collection of ${vehicleLabel}: the sale is complete. Your documents remain available: ${url}`
+        : `You confirmed handing over ${vehicleLabel}: the sale is complete. Your documents remain available: ${url}`,
+      footer: 'The DealAutoPro team'
+    }
+  }[lang];
+
+  return {
+    subject: copy.subject,
+    text: copy.text,
+    html: layout({
+      heading: copy.heading,
+      footer: copy.footer,
+      body: `
+        <p style="color: #1A2230; font-size: 16px;">${copy.hello}</p>
+        ${vehicleCard(photoUrl, vehicleLabel, copy.subtitle)}
+        <p style="color: #2F6F4F; font-size: 15px; font-weight: bold;">${copy.line1}</p>
+        <p style="color: #5A5E66; font-size: 14px;">${copy.line2}</p>
+        <div style="text-align: center; margin: 30px 0;">
+          <a href="${url}" style="background-color: #2F6F4F; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold;">${copy.cta}</a>
+        </div>
+      `
+    })
+  };
+};
+
+/**
+ * E-mail envoyé au candidat suivant dans la liste d'attente suite au retrait du gagnant précédent.
+ * Il l'invite à accepter ou refuser l'opportunité d'acquérir le véhicule.
+ */
+const saleNextBidderOfferEmail = ({ user, brand, model, year, photoUrl, sessionName, saleId, amount }) => {
+  const lang = normalizeLanguage(user.language);
+  const vehicleLabel = [brand, model].filter(Boolean).join(' ') || (lang === 'fr' ? 'Véhicule' : 'Vehicle');
+  const url = `${process.env.CLIENT_URL || 'http://localhost:3000'}/${lang}/acheteur/tableau-de-bord/mes-vehicules/${saleId}`;
+  const formattedAmount = new Intl.NumberFormat(lang === 'fr' ? 'fr-FR' : 'en-US', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 }).format(amount || 0);
+
+  const copy = {
+    fr: {
+      subject: `Bonne nouvelle ! Le véhicule ${vehicleLabel} vous est proposé - DealAutoPro`,
+      heading: 'Proposition de véhicule',
+      hello: `Bonjour ${user.firstName} ${user.lastName},`,
+      subtitle: [year ? `Année ${year}` : null, sessionName].filter(Boolean).join(' · '),
+      line1: `Suite au retrait du gagnant précédent, vous devenez le candidat prioritaire pour l'acquisition de : ${vehicleLabel}.`,
+      line2: `Montant de votre offre retenue : ${formattedAmount}.`,
+      line3: 'Veuillez vous rendre sur votre tableau de bord afin de confirmer si vous souhaitez acquérir ce véhicule ou décliner l\'offre sans pénalité.',
+      cta: 'Répondre à la proposition',
+      text: `Bonne nouvelle ! Le véhicule ${vehicleLabel} vous est proposé pour le montant de ${formattedAmount}. Veuillez confirmer ou décliner sur votre tableau de bord : ${url}`,
+      footer: "L'équipe DealAutoPro"
+    },
+    en: {
+      subject: `Good news! Vehicle ${vehicleLabel} is now offered to you - DealAutoPro`,
+      heading: 'Vehicle Offer',
+      hello: `Hello ${user.firstName} ${user.lastName},`,
+      subtitle: [year ? `Year ${year}` : null, sessionName].filter(Boolean).join(' · '),
+      line1: `Following the withdrawal of the previous winner, you are now the priority candidate to acquire: ${vehicleLabel}.`,
+      line2: `Your accepted bid amount: ${formattedAmount}.`,
+      line3: 'Please visit your dashboard to confirm whether you wish to acquire this vehicle or decline the offer without penalty.',
+      cta: 'Respond to proposal',
+      text: `Good news! Vehicle ${vehicleLabel} is offered to you for ${formattedAmount}. Please confirm or decline on your dashboard: ${url}`,
+      footer: 'The DealAutoPro team'
+    }
+  }[lang];
+
+  return {
+    subject: copy.subject,
+    text: copy.text,
+    html: layout({
+      heading: copy.heading,
+      footer: copy.footer,
+      body: `
+        <p style="color: #1A2230; font-size: 16px;">${copy.hello}</p>
+        ${vehicleCard(photoUrl, vehicleLabel, copy.subtitle)}
+        <p style="color: #5A5E66; font-size: 14px;">${copy.line1}</p>
+        <p style="color: #13243C; font-size: 16px; font-weight: bold;">${copy.line2}</p>
+        <p style="color: #5A5E66; font-size: 14px;">${copy.line3}</p>
+        <div style="text-align: center; margin: 30px 0;">
+          <a href="${url}" style="background-color: #D9704F; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold;">${copy.cta}</a>
+        </div>
+      `
+    })
+  };
+};
+
 module.exports = {
   SUPPORTED_LANGUAGES,
   normalizeLanguage,
@@ -410,5 +1302,19 @@ module.exports = {
   correctionEmail,
   dossierApprovalEmail,
   dossierRejectionEmail,
-  dossierCorrectionEmail
+  dossierCorrectionEmail,
+  saleWonEmail,
+  saleStepReminderEmail,
+  adminLatePaymentAlertEmail,
+  saleWinnerRemovedEmail,
+  saleNextBidderOfferEmail,
+  saleAwardedSellerEmail,
+  saleUnsoldSellerEmail,
+  saleCommissionPaidSellerEmail,
+  saleCertificateReadyEmail,
+  saleSignedCertificateSellerEmail,
+  saleCertificateRejectedBuyerEmail,
+  saleCertificateRejectedAdminEmail,
+  saleHandoverReadyBuyerEmail,
+  saleClosedEmail
 };

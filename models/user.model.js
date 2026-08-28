@@ -26,7 +26,8 @@ const userSchema = new mongoose.Schema({
   companyName: {
     type: String,
     required: true,
-    trim: true
+    trim: true,
+    unique: true
   },
   activityType: {
     type: String,
@@ -36,7 +37,8 @@ const userSchema = new mongoose.Schema({
   phone: {
     type: String,
     required: true,
-    trim: true
+    trim: true,
+    unique: true
   },
   role: {
     type: String,
@@ -50,7 +52,15 @@ const userSchema = new mongoose.Schema({
     country: { type: String, trim: true },
     postalCode: { type: String, trim: true }
   },
-  kbisNumber: {
+  // Numéro SIRET de l'établissement : 14 chiffres (SIREN sur 9 + NIC sur 5)
+  siret: {
+    type: String,
+    trim: true,
+    unique: true,
+    sparse: true
+  },
+  // Tampon de l'entreprise, détouré sur fond transparent (facultatif)
+  stampUrl: {
     type: String,
     trim: true
   },
@@ -111,6 +121,11 @@ const userSchema = new mongoose.Schema({
   expoPushToken: {
     type: String,
     trim: true
+  },
+  // Commission impayée (suite annulation)
+  pendingCommission: {
+    amount: { type: Number },
+    saleId: { type: mongoose.Schema.Types.ObjectId, ref: 'Sale' }
   }
 }, {
   timestamps: true

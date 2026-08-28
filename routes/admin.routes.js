@@ -13,9 +13,19 @@ router.post('/users/:id/reject', adminController.rejectUser);
 router.post('/users/:id/request-correction', adminController.requestCorrection);
 router.put('/users/:id/status', adminController.updateStatus);
 
+router.get('/dashboard-stats', adminController.getDashboardStats);
+router.get('/payments', adminController.getPayments);
+
 // Notifications admin
 router.get('/notifications', adminController.getNotifications);
 router.put('/notifications/read-all', adminController.markAllNotificationsAsRead);
 router.put('/notifications/:id/read', adminController.markNotificationAsRead);
+
+// Gestion des ventes par l'admin
+router.get('/sales/:id', adminController.getSale);
+router.put('/sales/:id/timer', adminController.toggleSaleTimer);
+router.put('/sales/:id/force-end', adminController.forceEndSale);
+router.put('/sales/:id/extend-deadline', adminController.extendSaleDeadline);
+router.post('/sales/:id/promote-next', adminController.promoteSaleNextBidder);
 
 module.exports = router;

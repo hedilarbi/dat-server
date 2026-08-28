@@ -61,7 +61,7 @@ const vehicleDossierSchema = new mongoose.Schema({
   },
   vin: { type: String, trim: true },
   description: { type: String, trim: true },
-  registrationNumber: { type: String, trim: true },
+  registrationNumber: { type: String, trim: true, unique: true, sparse: true },
   registrationCountry: { type: String, trim: true },
   firstRegistrationDate: { type: String, trim: true },
   co2: { type: String, trim: true },
@@ -96,8 +96,19 @@ const vehicleDossierSchema = new mongoose.Schema({
   reservePrice: { type: Number },
   conditionDetails: { type: String, trim: true },
 
-  // Anticipé cahier des charges §6.11/10.21, non exploité dans ce lot
+  // Compteur de mises en vente (cahier des charges §6.11) : incrémenté dès qu'un véhicule
+  // est publié dans une session d'appel d'offres. `lastListedSession` retient la dernière
+  // session comptabilisée, pour qu'un retrait suivi d'une réaffectation à la même session
+  // ne compte pas deux fois.
   listingCount: { type: Number, default: 0 },
+  // Numéro de lot attribué à la publication dans une session (« Lot #12311 »). Un nouveau
+  // numéro est tiré à chaque nouvelle mise en vente : un lot appartient à une session.
+  lotNumber: { type: Number, default: null, index: true },
+  lastListedSession: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Session',
+    default: null
+  },
 
   // Session d'appel d'offres à laquelle ce véhicule est rattaché
   session: {

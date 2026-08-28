@@ -1,4 +1,24 @@
 const vehicleDossierService = require('../services/vehicleDossier.service');
+const adminVehicleSalesService = require('../services/adminVehicleSales.service');
+
+const listMaxedOutVehicles = async (req, res, next) => {
+  try {
+    const result = await adminVehicleSalesService.adminListMaxedOutVehicles({ limit: req.query.limit });
+    res.status(200).json({ success: true, ...result });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const listVehicleSales = async (req, res, next) => {
+  try {
+    const { state, columnFilters, page, limit } = req.query;
+    const result = await adminVehicleSalesService.adminListVehicleSales({ state, columnFilters, page, limit });
+    res.status(200).json({ success: true, ...result });
+  } catch (error) {
+    next(error);
+  }
+};
 
 const listDossiers = async (req, res, next) => {
   try {
@@ -83,5 +103,7 @@ module.exports = {
   approveDossier,
   rejectDossier,
   requestCorrection,
-  getAvailableDossiers
+  getAvailableDossiers,
+  listVehicleSales,
+  listMaxedOutVehicles
 };

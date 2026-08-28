@@ -50,7 +50,7 @@ router.get('/', protect, adminOnly, async (req, res) => {
       })
     );
 
-    res.json(sessionsWithCount);
+    res.json(await sessionService.withResolvedCommission(sessionsWithCount));
   } catch (error) {
     console.error('Erreur GET /sessions:', error);
     res.status(500).json({ message: 'Erreur lors de la récupération des sessions.' });
@@ -60,7 +60,7 @@ router.get('/', protect, adminOnly, async (req, res) => {
 // POST /api/sessions - Créer une session manuellement
 router.post('/', protect, adminOnly, async (req, res) => {
   try {
-    const { name, date, startDate, durationHours } = req.body;
+    const { name, date, startDate, durationHours, commission } = req.body;
     const start = startDate || date;
 
     if (!start) {
@@ -71,10 +71,14 @@ router.post('/', protect, adminOnly, async (req, res) => {
       name,
       startDate: start,
       durationHours: durationHours || 48,
+      commission,
     });
 
-    res.status(201).json(newSession);
+    res.status(201).json(await sessionService.withResolvedCommission(newSession));
   } catch (error) {
+    if (error.codeName) {
+      return res.status(error.statusCode || 400).json({ error: error.codeName, message: error.message });
+    }
     console.error('Erreur POST /sessions:', error);
     res.status(500).json({ message: 'Erreur lors de la création de la session.' });
   }
@@ -83,16 +87,18 @@ router.post('/', protect, adminOnly, async (req, res) => {
 // PUT /api/sessions/:id - Modifier les informations éditables d'une session
 router.put('/:id', protect, adminOnly, async (req, res) => {
   try {
-    const name = typeof req.body.name === 'string' ? req.body.name.trim() : '';
-    if (!name) {
-      return res.status(400).json({ message: 'Le nom de la session est requis.' });
-    }
-    const session = await Session.findByIdAndUpdate(req.params.id, { $set: { name } }, { new: true, runValidators: true });
-    if (!session) {
-      return res.status(404).json({ message: 'Session introuvable.' });
-    }
-    res.json({ message: 'Nom de la session mis à jour.', session });
+    const session = await sessionService.updateSession(req.params.id, {
+      name: req.body.name,
+      commission: req.body.commission,
+    });
+    res.json({
+      message: 'Session mise à jour.',
+      session: await sessionService.withResolvedCommission(session),
+    });
   } catch (error) {
+    if (error.codeName) {
+      return res.status(error.statusCode || 400).json({ error: error.codeName, message: error.message });
+    }
     console.error('Erreur PUT /sessions/:id:', error);
     res.status(500).json({ message: 'Erreur lors de la modification de la session.' });
   }
@@ -112,7 +118,7 @@ router.get('/:id', protect, adminOnly, async (req, res) => {
 
     session.vehicles = vehicles;
     session.vehicleCount = vehicles.length;
-    res.json(session);
+    res.json(await sessionService.withResolvedCommission(session));
   } catch (error) {
     console.error('Erreur GET /sessions/:id:', error);
     res.status(500).json({ message: 'Erreur lors de la récupération de la session.' });
@@ -137,11 +143,14 @@ router.post('/:id/add-vehicle', protect, adminOnly, async (req, res) => {
       return res.status(404).json({ message: 'Véhicule introuvable.' });
     }
 
-    vehicle.session = session._id.toString();
-    await vehicle.save();
+    await sessionService.assignVehicleToSession(vehicle, session._id);
 
     res.json({ message: 'Véhicule ajouté à la session avec succès.', vehicle });
   } catch (error) {
+    // Erreur métier identifiée : message explicite plutôt qu'une erreur serveur générique
+    if (error.codeName) {
+      return res.status(error.statusCode || 400).json({ error: error.codeName, message: error.message });
+    }
     console.error('Erreur POST /sessions/:id/add-vehicle:', error);
     res.status(500).json({ message: 'Erreur lors de l\'ajout du véhicule à la session.' });
   }
@@ -171,6 +180,24 @@ router.post('/:id/remove-vehicle', protect, adminOnly, async (req, res) => {
 });
 
 // DELETE /api/sessions/:id - Supprimer une session
+// Clôture anticipée d'une session : voir sessionService.closeSessionNow.
+router.post('/:id/close', protect, adminOnly, async (req, res) => {
+  try {
+    const result = await sessionService.closeSessionNow(req.params.id);
+    res.json({
+      message: `Session clôturée. ${result.winners} gagnant(s) désigné(s), ${result.withoutWinner} véhicule(s) sans preneur.`,
+      session: result.session,
+      attributions: { total: result.total, winners: result.winners, withoutWinner: result.withoutWinner },
+    });
+  } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ error: error.codeName, message: error.message });
+    }
+    console.error('Erreur POST /sessions/:id/close:', error);
+    res.status(500).json({ message: 'Erreur lors de la clôture de la session.' });
+  }
+});
+
 router.delete('/:id', protect, adminOnly, async (req, res) => {
   try {
     const session = await Session.findById(req.params.id);

@@ -161,9 +161,25 @@ const notifyAdminOfSubmission = async (dossier, sellerId) => {
 };
 
 const createDossier = async (sellerId, payload) => {
+  const fields = pickEditableFields(payload);
+  if (fields.registrationNumber) {
+    const cleanReg = fields.registrationNumber.trim().replace(/[\s-]/g, '');
+    if (cleanReg) {
+      const existing = await VehicleDossier.findOne({
+        registrationNumber: new RegExp(`^${cleanReg}$`, 'i')
+      });
+      if (existing) {
+        const error = new Error(`Un dossier véhicule existe déjà avec le matricule / immatriculation « ${fields.registrationNumber} ».`);
+        error.statusCode = 400;
+        error.codeName = 'vehicleDossier.registration_number_exists';
+        throw error;
+      }
+    }
+  }
+
   const dossier = new VehicleDossier({
     seller: sellerId,
-    ...pickEditableFields(payload)
+    ...fields
   });
 
   if (payload.submit) {
@@ -204,8 +220,25 @@ const updateDossier = async (dossierId, sellerId, payload) => {
     throw error;
   }
 
+  const fields = pickEditableFields(payload);
+  if (fields.registrationNumber && fields.registrationNumber !== dossier.registrationNumber) {
+    const cleanReg = fields.registrationNumber.trim().replace(/[\s-]/g, '');
+    if (cleanReg) {
+      const existing = await VehicleDossier.findOne({
+        registrationNumber: new RegExp(`^${cleanReg}$`, 'i'),
+        _id: { $ne: dossierId }
+      });
+      if (existing) {
+        const error = new Error(`Un dossier véhicule existe déjà avec le matricule / immatriculation « ${fields.registrationNumber} ».`);
+        error.statusCode = 400;
+        error.codeName = 'vehicleDossier.registration_number_exists';
+        throw error;
+      }
+    }
+  }
+
   const wasCorrection = dossier.status === 'correction_demandee';
-  Object.assign(dossier, pickEditableFields(payload));
+  Object.assign(dossier, fields);
 
   if (payload.submit) {
     assertSubmittable(dossier);
@@ -221,10 +254,40 @@ const updateDossier = async (dossierId, sellerId, payload) => {
   return dossier;
 };
 
+/**
+ * Dossiers d'un vendeur, paginés et filtrables colonne par colonne.
+ *
+ * Le filtrage se fait en base et non sur le tableau déjà chargé : sinon il ne porterait que
+ * sur la page affichée, et le compteur de résultats mentirait.
+ */
 const listDossiers = async (sellerId, filters = {}) => {
   const query = { seller: sellerId };
-  if (filters.status) query.status = filters.status;
-  return VehicleDossier.find(query).sort({ updatedAt: -1 });
+  if (filters.status) {
+    // Plusieurs statuts internes partagent un même libellé côté vendeur — « soumis » et
+    // « en_attente_validation » notamment. Le filtre accepte donc une liste séparée par
+    // des virgules, pour qu'une seule option d'interface couvre bien les deux.
+    const statuses = String(filters.status).split(',').map((v) => v.trim()).filter(Boolean);
+    if (statuses.length === 1) query.status = statuses[0];
+    else if (statuses.length > 1) query.status = { $in: statuses };
+  }
+
+  // Recherche par sous-chaîne, insensible à la casse, comme côté administration
+  for (const field of ['brand', 'model']) {
+    if (filters[field]) query[field] = new RegExp(escapeRegExp(String(filters[field])), 'i');
+  }
+  if (filters.reservePrice && Number.isFinite(Number(filters.reservePrice))) {
+    query.reservePrice = Number(filters.reservePrice);
+  }
+
+  const page = Math.max(1, parseInt(filters.page, 10) || 1);
+  const limit = Math.max(1, Math.min(100, parseInt(filters.limit, 10) || 20));
+
+  const [dossiers, total] = await Promise.all([
+    VehicleDossier.find(query).sort({ updatedAt: -1 }).skip((page - 1) * limit).limit(limit),
+    VehicleDossier.countDocuments(query),
+  ]);
+
+  return { dossiers, total, page, limit, totalPages: Math.max(1, Math.ceil(total / limit)) };
 };
 
 const getDossierById = async (dossierId, sellerId) => getOwnedDossier(dossierId, sellerId);

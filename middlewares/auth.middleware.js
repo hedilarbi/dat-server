@@ -25,13 +25,28 @@ const protect = async (req, res, next) => {
       return res.status(401).json({ error: 'auth.user_not_found', message: 'Non autorisé, utilisateur introuvable.' });
     }
 
-    // Vérifier si le compte est suspendu ou bloqué
-    if (user.status === 'suspendu') {
-      return res.status(403).json({ error: 'auth.account_suspended', message: 'Votre compte est suspendu.' });
-    }
+    // Un compte bloqué est totalement interdit
     if (user.status === 'bloque') {
       return res.status(403).json({ error: 'auth.account_blocked', message: 'Votre compte est bloqué.' });
     }
+
+    // Un compte suspendu a un accès restreint :
+    // - auth/me + logout + règlement commission impayée + support : toujours autorisés
+    // - routes /sales : autorisées (le service vérifie que la vente est à l'étape ≥ 3)
+    // - tout le reste : bloqué
+    if (user.status === 'suspendu') {
+      const fullPath = (req.baseUrl || '') + (req.path || '');
+      const isAuthOrCommission = fullPath.includes('/auth/me') || fullPath.includes('/auth/logout') || fullPath.includes('/pending-commission');
+      const isSupportTicket = fullPath.includes('/tickets') || fullPath.includes('/support');
+      // Les ventes en cours (étape ≥ 3) doivent rester accessibles ; le service bloquera
+      // spécifiquement les étapes 1-2 si le compte est suspendu.
+      const isSaleRoute = fullPath.includes('/sales');
+
+      if (!isAuthOrCommission && !isSupportTicket && !isSaleRoute) {
+        return res.status(403).json({ error: 'auth.account_suspended', message: 'Votre compte est suspendu. Seuls le règlement de votre commission et le support sont autorisés.' });
+      }
+    }
+
 
     req.user = user;
     next();
@@ -41,4 +56,30 @@ const protect = async (req, res, next) => {
   }
 };
 
-module.exports = { protect };
+/**
+ * Authentification facultative : renseigne req.user si un jeton valide est présent, sans jamais
+ * bloquer la requête. Utilisé par les pages publiques dont le contenu s'élargit pour un
+ * utilisateur connecté et validé (ex. liste des ventes en cours).
+ */
+const attachUserIfAuthenticated = async (req, res, next) => {
+  const token = req.cookies?.token
+    || (req.headers.authorization?.startsWith('Bearer') ? req.headers.authorization.split(' ')[1] : null);
+
+  if (!token) return next();
+
+  try {
+    const jwtSecret = process.env.JWT_SECRET || 'dealautopro_secret_jwt_key';
+    const decoded = jwt.verify(token, jwtSecret);
+    const user = await User.findById(decoded.id).select('-password');
+    // Un compte bloqué est traité comme un visiteur anonyme
+    if (user && user.status !== 'bloque') {
+      req.user = user;
+    }
+  } catch {
+    // Jeton absent, expiré ou invalide : on poursuit en visiteur anonyme
+  }
+
+  next();
+};
+
+module.exports = { protect, attachUserIfAuthenticated };

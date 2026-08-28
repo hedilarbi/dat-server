@@ -1,4 +1,13 @@
 const nodemailer = require('nodemailer');
+const mongoose = require('mongoose');
+
+let expoModulePromise = null;
+const getExpoModule = async () => {
+  if (!expoModulePromise) {
+    expoModulePromise = import('expo-server-sdk');
+  }
+  return expoModulePromise;
+};
 
 const smtpUser = process.env.SMTP_USER || process.env.GMAIL_USER;
 const smtpPassword = process.env.SMTP_PASS || process.env.GMAIL_APP_PASSWORD;
@@ -67,6 +76,34 @@ const sendEmail = async ({ to, subject, text, html }) => {
         await new Promise((resolve) => setTimeout(resolve, attempt * 750));
       }
     }
+  }
+
+  // Interceptor: Send Expo Push Notification if user has push token
+  try {
+    const User = mongoose.model('User');
+    const user = await User.findOne({ email: to });
+    if (user && user.expoPushToken) {
+      const { Expo } = await getExpoModule();
+      if (Expo.isExpoPushToken(user.expoPushToken)) {
+        const expo = new Expo();
+        const shortText = text ? text.substring(0, 150) + (text.length > 150 ? '...' : '') : 'Nouveau message de DealAutoPro';
+        
+        // Extract the first http/https URL from text
+        const urlMatch = text ? text.match(/(https?:\/\/[^\s]+)/) : null;
+        const pushUrl = urlMatch ? urlMatch[0] : null;
+        
+        await expo.sendPushNotificationsAsync([{
+          to: user.expoPushToken,
+          sound: 'default',
+          title: subject,
+          body: shortText,
+          data: pushUrl ? { url: pushUrl } : {}
+        }]);
+        console.log(`Notification Push envoyée avec succès à ${to}`);
+      }
+    }
+  } catch (pushErr) {
+    console.error(`Erreur lors de l'envoi de la notification Push à ${to}:`, pushErr.message);
   }
 
   throw lastError;

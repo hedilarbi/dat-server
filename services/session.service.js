@@ -1,6 +1,7 @@
 const Session = require('../models/session.model');
 const SessionConfig = require('../models/sessionConfig.model');
-const VehicleDossier = require('../models/vehicleDossier.model');
+const commissionService = require('./commission.service');
+const { nextLotNumber } = require('../models/counter.model');
 
 /**
  * Récupère ou initialise la configuration des sessions (Lundi, Mercredi, Vendredi, 48h)
@@ -13,7 +14,6 @@ const getConfig = async () => {
       startTime: '10:00',
       durationHours: 48,
       autoGenerateWeeks: 4,
-      autoAssignVehicles: true,
     });
     await config.save();
   }
@@ -33,7 +33,6 @@ const updateConfig = async (payload) => {
   if (payload.startTime) config.startTime = payload.startTime;
   if (payload.durationHours !== undefined) config.durationHours = Number(payload.durationHours);
   if (payload.autoGenerateWeeks !== undefined) config.autoGenerateWeeks = Number(payload.autoGenerateWeeks);
-  if (payload.autoAssignVehicles !== undefined) config.autoAssignVehicles = Boolean(payload.autoAssignVehicles);
 
   await config.save();
   await autoGenerateAndSyncSessions();
@@ -84,7 +83,9 @@ const syncSessionStatuses = async () => {
 };
 
 /**
- * Génère automatiquement les sessions hebdomadaires récurrentes et affecte les véhicules validés
+ * Met à jour les statuts des sessions existantes, puis crée les sessions hebdomadaires
+ * récurrentes manquantes d'après la planification (Sessions > Planification).
+ * Ne crée que des sessions vides : leur contenu est affecté manuellement par l'admin.
  */
 const autoGenerateAndSyncSessions = async () => {
   await syncSessionStatuses();
@@ -140,6 +141,8 @@ const autoGenerateAndSyncSessions = async () => {
           durationHours: config.durationHours,
           isManual: false,
           status: initialStatus,
+          // Les sessions récurrentes suivent la configuration de commission par défaut
+          commission: { useDefault: true, tiers: [] },
         });
 
         await newSession.save();
@@ -147,25 +150,89 @@ const autoGenerateAndSyncSessions = async () => {
     }
   }
 
-  // Affectation automatique des véhicules validés sans session aux prochaines sessions à venir
-  if (config.autoAssignVehicles) {
-    const unassignedVehicles = await VehicleDossier.find({ status: 'valide', session: null }).sort({ updatedAt: 1 });
-    if (unassignedVehicles.length > 0) {
-      const nextSession = await Session.findOne({ status: { $in: ['open', 'upcoming'] } }).sort({ startDate: 1 });
-      if (nextSession) {
-        for (const vehicle of unassignedVehicles) {
-          vehicle.session = nextSession._id.toString();
-          await vehicle.save();
-        }
-      }
-    }
+  // L'affectation des véhicules aux sessions est exclusivement manuelle (voir
+  // assignVehicleToSession, appelée depuis l'interface admin) : la génération automatique
+  // ne crée que le calendrier des sessions, jamais leur contenu.
+};
+
+/**
+ * Publier un véhicule dans une session. L'affectation est toujours déclenchée manuellement
+ * depuis l'interface admin, et incrémente le compteur de tentatives de vente du véhicule
+ * (cahier des charges §6.11). Une réaffectation à la même session — après un retrait par
+ * exemple — ne recompte pas la tentative.
+ *
+ * Le nombre de tentatives autorisées (Configuration > Configuration générale) ne bloque pas
+ * l'affectation : c'est un repère affiché à l'administrateur, qui reste libre de republier
+ * un véhicule au-delà.
+ */
+const assignVehicleToSession = async (vehicle, sessionId) => {
+  const sessionKey = String(sessionId);
+  const isNewListing = String(vehicle.lastListedSession || '') !== sessionKey;
+
+  vehicle.session = sessionKey;
+  if (isNewListing) {
+    vehicle.lastListedSession = sessionId;
+    vehicle.listingCount = (vehicle.listingCount || 0) + 1;
+    // Un lot appartient à une mise en vente : republier le véhicule lui donne un nouveau
+    // numéro, le réaffecter à la même session conserve le sien.
+    vehicle.lotNumber = await nextLotNumber();
   }
+
+  await vehicle.save();
+  return vehicle;
+};
+
+/**
+ * Clôturer une session immédiatement, sans attendre la fin de sa fenêtre.
+ *
+ * La fin anticipée doit produire EXACTEMENT ce que produit une fin par le temps : la date
+ * de fin est ramenée à maintenant, puis l'attribution est jouée par le même
+ * `processSessionAttributions` que la boucle de fond. Réécrire l'attribution ici ferait
+ * diverger les deux chemins au premier changement de règle.
+ *
+ * `saleService` est chargé à l'appel : les deux services se référencent mutuellement, un
+ * require en tête de fichier créerait un cycle.
+ */
+const closeSessionNow = async (sessionId) => {
+  const session = await Session.findById(sessionId);
+  if (!session) {
+    const error = new Error('Session introuvable.');
+    error.statusCode = 404;
+    error.codeName = 'session.not_found';
+    throw error;
+  }
+  if (session.attributionsProcessedAt) {
+    const error = new Error('Cette session a déjà été clôturée et ses gagnants désignés.');
+    error.statusCode = 409;
+    error.codeName = 'session.already_closed';
+    throw error;
+  }
+
+  const now = new Date();
+  // Sans ce recalage, la synchronisation périodique rouvrirait la session : c'est la
+  // fenêtre de dates qui fait foi pour le statut, pas le champ `status`.
+  session.endDate = now;
+  if (session.startDate > now) session.startDate = now;
+  session.status = 'closed';
+  await session.save();
+
+  const saleService = require('./sale.service');
+  const results = await saleService.processSessionAttributions(session);
+  session.attributionsProcessedAt = new Date();
+  await session.save();
+
+  return {
+    session,
+    total: results.length,
+    winners: results.filter((sale) => sale.status === 'en_cours').length,
+    withoutWinner: results.filter((sale) => sale.status === 'sans_gagnant').length,
+  };
 };
 
 /**
  * Créer une session manuellement
  */
-const createManualSession = async ({ name, startDate, durationHours }) => {
+const createManualSession = async ({ name, startDate, durationHours, commission }) => {
   const start = new Date(startDate);
   const duration = Number(durationHours) || 48;
   const end = new Date(start.getTime() + duration * 3600 * 1000);
@@ -186,10 +253,66 @@ const createManualSession = async ({ name, startDate, durationHours }) => {
     durationHours: duration,
     isManual: true,
     status,
+    // Configuration par défaut sauf si l'admin l'a personnalisée dans le formulaire de création
+    commission: commissionService.parseSessionCommission(commission),
   });
 
   await newSession.save();
   return newSession;
+};
+
+/**
+ * Mettre à jour les informations éditables d'une session (nom, configuration de commission)
+ */
+const updateSession = async (id, { name, commission }) => {
+  const session = await Session.findById(id);
+  if (!session) {
+    const err = new Error('Session introuvable.');
+    err.codeName = 'session.not_found';
+    err.statusCode = 404;
+    throw err;
+  }
+
+  if (name !== undefined) {
+    const trimmed = typeof name === 'string' ? name.trim() : '';
+    if (!trimmed) {
+      const err = new Error('Le nom de la session est requis.');
+      err.codeName = 'session.validation_error';
+      throw err;
+    }
+    session.name = trimmed;
+  }
+
+  if (commission !== undefined) {
+    session.commission = commissionService.parseSessionCommission(commission);
+  }
+
+  await session.save();
+  return session;
+};
+
+/**
+ * Compléter une ou plusieurs sessions avec les tranches de commission réellement applicables :
+ * les siennes si elle est personnalisée, sinon celles de la configuration globale.
+ * Les tranches par défaut ne sont chargées qu'une fois pour toute la liste.
+ */
+const withResolvedCommission = async (sessions) => {
+  const defaultTiers = await commissionService.getTiers();
+  const list = Array.isArray(sessions) ? sessions : [sessions];
+
+  const resolved = list.map((session) => {
+    const plain = typeof session.toObject === 'function' ? session.toObject() : session;
+    const commission = plain.commission || { useDefault: true, tiers: [] };
+    return {
+      ...plain,
+      commission: {
+        useDefault: commission.useDefault !== false,
+        tiers: commissionService.resolveTiers(commission, defaultTiers),
+      },
+    };
+  });
+
+  return Array.isArray(sessions) ? resolved : resolved[0];
 };
 
 module.exports = {
@@ -197,5 +320,9 @@ module.exports = {
   updateConfig,
   syncSessionStatuses,
   autoGenerateAndSyncSessions,
+  assignVehicleToSession,
+  closeSessionNow,
   createManualSession,
+  updateSession,
+  withResolvedCommission,
 };
