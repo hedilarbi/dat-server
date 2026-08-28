@@ -41,9 +41,10 @@ const protect = async (req, res, next) => {
       // Les ventes en cours (étape ≥ 3) doivent rester accessibles ; le service bloquera
       // spécifiquement les étapes 1-2 si le compte est suspendu.
       const isSaleRoute = fullPath.includes('/sales');
+      const isVehicleDossierRoute = fullPath.includes('/vehicle-dossiers') && req.method === 'GET';
 
-      if (!isAuthOrCommission && !isSupportTicket && !isSaleRoute) {
-        return res.status(403).json({ error: 'auth.account_suspended', message: 'Votre compte est suspendu. Seuls le règlement de votre commission et le support sont autorisés.' });
+      if (!isAuthOrCommission && !isSupportTicket && !isSaleRoute && !isVehicleDossierRoute) {
+        return res.status(403).json({ error: 'auth.account_suspended', message: 'Votre compte est suspendu. Seuls le règlement de votre commission, vos ventes en cours et le support sont autorisés.' });
       }
     }
 

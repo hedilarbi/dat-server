@@ -619,25 +619,25 @@ const saleWinnerRemovedEmail = ({ user, brand, model, year, photoUrl, sessionNam
 
   const copy = {
     fr: {
-      subject: `Vous avez perdu l'attribution de ${vehicleLabel} - DealAutoPro`,
-      heading: 'Attribution retirée',
+      subject: `Attribution retirée et compte suspendu pour ${vehicleLabel} - DealAutoPro`,
+      heading: 'Attribution retirée & Compte suspendu',
       hello: `Bonjour ${user.firstName} ${user.lastName},`,
       subtitle: [year ? `Année ${year}` : null, sessionName].filter(Boolean).join(' · '),
       line1: `Le délai imparti pour l'étape « ${stepLabel} » est écoulé sans que celle-ci ait été finalisée.`,
-      line2: 'L\'attribution de ce véhicule vous a donc été retirée : il est proposé à l\'offre suivante.',
-      line3: 'Vous pouvez continuer à déposer des offres sur les véhicules des sessions en cours.',
-      text: `Le délai de l'étape « ${stepLabel} » est écoulé : l'attribution de ${vehicleLabel} vous a été retirée et le véhicule est proposé à l'offre suivante.`,
+      line2: `L'attribution de ce véhicule vous a donc été retirée et celui-ci est proposé à l'offre suivante.`,
+      line3: `Conformément à nos règles de fonctionnement, votre compte a été suspendu suite à ce dépassement de délai. Vos accès aux enchères sont temporairement bloqués. Pour régulariser votre situation et réactiver votre compte, veuillez vous connecter à votre espace afin de régler les frais de dossier dus.`,
+      text: `Le délai de l'étape « ${stepLabel} » est écoulé : l'attribution de ${vehicleLabel} vous a été retirée et votre compte a été suspendu. Pour réactiver votre compte, rendez-vous sur votre espace pour régler les frais dus.`,
       footer: "L'équipe DealAutoPro"
     },
     en: {
-      subject: `You lost the award for ${vehicleLabel} - DealAutoPro`,
-      heading: 'Award withdrawn',
+      subject: `Award withdrawn and account suspended for ${vehicleLabel} - DealAutoPro`,
+      heading: 'Award Withdrawn & Account Suspended',
       hello: `Hello ${user.firstName} ${user.lastName},`,
       subtitle: [year ? `Year ${year}` : null, sessionName].filter(Boolean).join(' · '),
       line1: `The deadline for the "${stepLabel}" step has passed without it being completed.`,
-      line2: 'This vehicle has therefore been withdrawn from you and offered to the next bidder.',
-      line3: 'You can keep bidding on vehicles in the current sessions.',
-      text: `The "${stepLabel}" deadline has passed: ${vehicleLabel} has been withdrawn from you and offered to the next bidder.`,
+      line2: `This vehicle has therefore been withdrawn from you and offered to the next bidder.`,
+      line3: `In accordance with our platform rules, your account has been suspended following this missed deadline. Your bidding access is currently blocked. To settle your account and reactivate your profile, please log in to your dashboard to pay the pending processing fees.`,
+      text: `The deadline for the "${stepLabel}" step has passed: ${vehicleLabel} has been withdrawn from you and your account has been suspended. Please log in to your account to settle the pending fees and reactivate your profile.`,
       footer: 'The DealAutoPro team'
     }
   }[lang];
@@ -653,7 +653,7 @@ const saleWinnerRemovedEmail = ({ user, brand, model, year, photoUrl, sessionNam
         ${vehicleCard(photoUrl, vehicleLabel, copy.subtitle)}
         <p style="color: #B04A2C; font-size: 14px; font-weight: bold;">${copy.line1}</p>
         <p style="color: #5A5E66; font-size: 14px;">${copy.line2}</p>
-        <p style="color: #5A5E66; font-size: 14px;">${copy.line3}</p>
+        <p style="color: #B04A2C; font-size: 14px; font-weight: 500;">${copy.line3}</p>
       `
     })
   };
@@ -1239,7 +1239,7 @@ const saleClosedEmail = ({ user, role, brand, model, year, photoUrl, sessionName
  * E-mail envoyé au candidat suivant dans la liste d'attente suite au retrait du gagnant précédent.
  * Il l'invite à accepter ou refuser l'opportunité d'acquérir le véhicule.
  */
-const saleNextBidderOfferEmail = ({ user, brand, model, year, photoUrl, sessionName, saleId, amount }) => {
+const saleNextBidderOfferEmail = ({ user, brand, model, year, photoUrl, sessionName, saleId, amount, deadlineHours = 24 }) => {
   const lang = normalizeLanguage(user.language);
   const vehicleLabel = [brand, model].filter(Boolean).join(' ') || (lang === 'fr' ? 'Véhicule' : 'Vehicle');
   const url = `${process.env.CLIENT_URL || 'http://localhost:3000'}/${lang}/acheteur/tableau-de-bord/mes-vehicules/${saleId}`;
@@ -1253,9 +1253,9 @@ const saleNextBidderOfferEmail = ({ user, brand, model, year, photoUrl, sessionN
       subtitle: [year ? `Année ${year}` : null, sessionName].filter(Boolean).join(' · '),
       line1: `Suite au retrait du gagnant précédent, vous devenez le candidat prioritaire pour l'acquisition de : ${vehicleLabel}.`,
       line2: `Montant de votre offre retenue : ${formattedAmount}.`,
-      line3: 'Veuillez vous rendre sur votre tableau de bord afin de confirmer si vous souhaitez acquérir ce véhicule ou décliner l\'offre sans pénalité.',
+      line3: `Vous disposez d'un délai de ${deadlineHours} heures pour confirmer si vous souhaitez acquérir ce véhicule ou décliner l'offre sans pénalité. Passé ce délai, le véhicule sera automatiquement proposé au candidat suivant.`,
       cta: 'Répondre à la proposition',
-      text: `Bonne nouvelle ! Le véhicule ${vehicleLabel} vous est proposé pour le montant de ${formattedAmount}. Veuillez confirmer ou décliner sur votre tableau de bord : ${url}`,
+      text: `Bonne nouvelle ! Le véhicule ${vehicleLabel} vous est proposé pour le montant de ${formattedAmount}. Vous disposez d'un délai de ${deadlineHours} heures pour confirmer ou décliner sur votre tableau de bord : ${url}`,
       footer: "L'équipe DealAutoPro"
     },
     en: {
@@ -1265,9 +1265,9 @@ const saleNextBidderOfferEmail = ({ user, brand, model, year, photoUrl, sessionN
       subtitle: [year ? `Year ${year}` : null, sessionName].filter(Boolean).join(' · '),
       line1: `Following the withdrawal of the previous winner, you are now the priority candidate to acquire: ${vehicleLabel}.`,
       line2: `Your accepted bid amount: ${formattedAmount}.`,
-      line3: 'Please visit your dashboard to confirm whether you wish to acquire this vehicle or decline the offer without penalty.',
+      line3: `You have a deadline of ${deadlineHours} hours to confirm whether you wish to acquire this vehicle or decline the offer without penalty. After this deadline, the vehicle will automatically be offered to the next candidate.`,
       cta: 'Respond to proposal',
-      text: `Good news! Vehicle ${vehicleLabel} is offered to you for ${formattedAmount}. Please confirm or decline on your dashboard: ${url}`,
+      text: `Good news! Vehicle ${vehicleLabel} is offered to you for ${formattedAmount}. You have ${deadlineHours} hours to confirm or decline on your dashboard: ${url}`,
       footer: 'The DealAutoPro team'
     }
   }[lang];
@@ -1283,7 +1283,7 @@ const saleNextBidderOfferEmail = ({ user, brand, model, year, photoUrl, sessionN
         ${vehicleCard(photoUrl, vehicleLabel, copy.subtitle)}
         <p style="color: #5A5E66; font-size: 14px;">${copy.line1}</p>
         <p style="color: #13243C; font-size: 16px; font-weight: bold;">${copy.line2}</p>
-        <p style="color: #5A5E66; font-size: 14px;">${copy.line3}</p>
+        <p style="color: #B04A2C; font-size: 14px; font-weight: bold;">⏱ ${copy.line3}</p>
         <div style="text-align: center; margin: 30px 0;">
           <a href="${url}" style="background-color: #D9704F; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold;">${copy.cta}</a>
         </div>

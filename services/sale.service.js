@@ -365,6 +365,7 @@ const promoteNextBidder = async (saleId, reason = 'delai_depasse') => {
         sessionName: session?.name || '',
         saleId: sale._id,
         amount: next.amount,
+        deadlineHours: nextWinnerAcceptanceDeadlineHours || 24,
       });
       await sendEmail({ to: candidate.email, subject: email.subject, text: email.text, html: email.html });
     } catch (err) {
@@ -1987,6 +1988,9 @@ const submitSellerCertificate = async ({ saleId, sellerId, url, filename }) => {
   sale.certificate.sellerSignedUrl = url;
   sale.certificate.sellerSignedFilename = filename;
   sale.certificate.sellerSignedAt = new Date();
+  if (sale.certificate.lastRejection?.rejectedBy === 'buyer') {
+    sale.certificate.lastRejection = null;
+  }
 
   // Le document déposé par le vendeur passe obligatoirement par la validation de l'acheteur (étape 4).
   enterStep(sale, 4, null);
@@ -2027,6 +2031,7 @@ const validateSellerCertificate = async ({ saleId, buyerId }) => {
   sale.certificate = {
     ...(sale.certificate?.toObject?.() || sale.certificate || {}),
     buyerValidatedAt: new Date(),
+    ...(sale.certificate?.lastRejection?.rejectedBy === 'buyer' ? { lastRejection: null } : {}),
   };
 
   const [buyer, seller] = await Promise.all([
@@ -2153,6 +2158,7 @@ const submitSignedCertificate = async ({ saleId, buyerId, url, filename }) => {
     signedUrl: url,
     signedFilename: filename || null,
     signedAt: new Date(),
+    ...(sale.certificate?.lastRejection?.rejectedBy === 'seller' ? { lastRejection: null } : {}),
   };
   // Le vendeur doit maintenant vérifier les documents déposés
   enterStep(sale, 6, null);
