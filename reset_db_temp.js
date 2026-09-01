@@ -5,7 +5,7 @@ const Sale = require('./models/sale.model');
 const Offer = require('./models/offer.model');
 const VehicleDossier = require('./models/vehicleDossier.model');
 const Session = require('./models/session.model');
-const User = require('./models/user.model');
+const SessionConfig = require('./models/sessionConfig.model');
 
 mongoose.connect(process.env.MONGODB_URI)
   .then(async () => {
@@ -19,32 +19,31 @@ mongoose.connect(process.env.MONGODB_URI)
     const salesResult = await Sale.deleteMany({});
     console.log(`Deleted ${salesResult.deletedCount} sales.`);
 
-    // 3. Reset vehicle dossiers to 'valide'
-    const vehiclesResult = await VehicleDossier.updateMany({}, { status: 'valide' });
-    console.log(`Reset ${vehiclesResult.modifiedCount} vehicles to "valide".`);
+    // 3. Reset only the vehicle fields linked to sessions / sales.
+    const vehiclesResult = await VehicleDossier.updateMany({}, {
+      $set: {
+        status: 'valide',
+        session: null,
+        lastListedSession: null,
+        lotNumber: null,
+        listingCount: 0,
+      },
+    });
+    console.log(`Reset ${vehiclesResult.modifiedCount} vehicle sale states.`);
 
     // 4. Delete all sessions
     const sessionsResult = await Session.deleteMany({});
     console.log(`Deleted ${sessionsResult.deletedCount} sessions.`);
 
-    // 5. Reactivate all suspended users to 'valide' and clear pending commission
-    const userResult = await User.updateMany(
-      { status: 'suspendu' },
-      { status: 'valide', $unset: { pendingCommission: 1 } }
-    );
-    console.log(`Reactivated ${userResult.modifiedCount} suspended accounts to 'valide'.`);
+    // Prevent the running background job from recreating sessions immediately.
+    await SessionConfig.updateMany({}, { $set: { autoGenerateWeeks: 0 } });
+    console.log('Disabled automatic session generation.');
 
-    // 6. Also clear pending commission for any other users
-    const clearCommissionResult = await User.updateMany(
-      { pendingCommission: { $exists: true } },
-      { $unset: { pendingCommission: 1 } }
-    );
-    console.log(`Cleared pending commissions for ${clearCommissionResult.modifiedCount} accounts.`);
-
-    mongoose.disconnect();
+    await mongoose.disconnect();
     console.log('Done.');
   })
   .catch(err => {
     console.error(err);
     mongoose.disconnect();
+    process.exitCode = 1;
   });

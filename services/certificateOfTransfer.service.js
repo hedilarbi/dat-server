@@ -208,8 +208,14 @@ const fillCertificateOfTransfer = async ({ vehicle, seller, buyer, transferredAt
   // que d'affirmer une absence à tort.
   if (vehicle?.registrationCardAvailable === true) {
     check(LAYOUT.vehicle.registrationCardYes);
+    if (vehicle.formulaNumber) {
+      write(LAYOUT.vehicle.formulaNumber, vehicle.formulaNumber);
+    }
   } else if (vehicle?.registrationCardAvailable === false) {
     check(LAYOUT.vehicle.registrationCardNo);
+    if (vehicle.registrationCardMissingMotif) {
+      write({ x: 339, y: 625 }, vehicle.registrationCardMissingMotif, 8); // Slightly below the NO checkbox, smaller font
+    }
   }
 
   // --- Ancien propriétaire (le vendeur) ---

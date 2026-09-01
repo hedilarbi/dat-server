@@ -16,6 +16,9 @@ router.get('/seller/:id', vendeurOnly, saleController.getSellerSale);
 // Étape 2 : le vendeur atteste avoir reçu le virement de l'acheteur
 router.post('/:id/transfer-received', vendeurOnly, saleController.confirmTransferReceived);
 
+// Étape 2,5 : collecte des données carte grise, puis génération des documents
+router.post('/:id/registration-card', vendeurOnly, saleController.processRegistrationCard);
+
 // Étape 3 : le vendeur redépose le certificat de cession signé et tamponné (s'il n'a pas de tampon auto)
 router.post('/:id/certificate/seller', vendeurOnly, saleController.submitSellerCertificate);
 

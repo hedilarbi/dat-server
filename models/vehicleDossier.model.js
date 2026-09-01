@@ -83,6 +83,8 @@ const vehicleDossierSchema = new mongoose.Schema({
     country: { type: String, trim: true },
   },
   registrationCardAvailable: { type: Boolean, default: true },
+  formulaNumber: { type: String, trim: true },
+  registrationCardMissingMotif: { type: String, trim: true },
   registrationCardMissingReasons: [{ type: String, enum: ['declaration_perte', 'declaration_vol', 'autre'] }],
   identificationSheetAvailable: { type: Boolean, default: false },
   policeBookNumber: { type: String, trim: true },

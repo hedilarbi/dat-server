@@ -1735,7 +1735,7 @@ const getSellerSale = async (saleId, sellerId) => {
   }
 
   const sale = await Sale.findOne({ _id: saleId, seller: sellerId })
-    .populate('vehicle', 'brand model year mileage photos listingCount registrationNumber')
+    .populate('vehicle', 'brand model year mileage photos listingCount registrationNumber registrationCardAvailable')
     .populate('session', 'name endDate')
     .populate('winner', 'companyName firstName lastName email phone address')
     .lean();
@@ -1788,6 +1788,7 @@ const getSellerSale = async (saleId, sellerId) => {
       year: vehicle.year ?? null,
       mileage: vehicle.mileage ?? null,
       registrationNumber: vehicle.registrationNumber || null,
+      registrationCardAvailable: vehicle.registrationCardAvailable ?? true,
       photoUrl: coverUrl(vehicle),
     } : null,
     session: sale.session ? {
@@ -1814,7 +1815,7 @@ const getSellerSale = async (saleId, sellerId) => {
 const generateCertificate = async (sale) => {
   const [vehicle, seller, buyer] = await Promise.all([
     VehicleDossier.findById(sale.vehicle)
-      .select('brand model year mileage vin registrationNumber firstRegistrationDate vehicleGenre engine registrationCardAvailable')
+      .select('brand model year mileage vin registrationNumber firstRegistrationDate vehicleGenre engine registrationCardAvailable formulaNumber registrationCardMissingMotif')
       .lean(),
     User.findById(sale.seller).select('companyName siret address stampUrl').lean(),
     User.findById(sale.winner).select('companyName siret address stampUrl').lean(),
@@ -1870,7 +1871,7 @@ const notifyBuyerCertificateReady = async (sale, vehicle) => {
 
 /**
  * Étape 2 : le virement est réalisé de banque à banque, hors plateforme. Seul le vendeur
- * peut attester l'avoir reçu ; sa confirmation fait passer la vente à l'étape 3.
+ * peut attester l'avoir reçu ; sa confirmation ouvre l'état intermédiaire 2,5.
  */
 const confirmTransferReceived = async ({ saleId, sellerId }) => {
   if (!mongoose.isValidObjectId(saleId)) {
@@ -1898,16 +1899,97 @@ const confirmTransferReceived = async ({ saleId, sellerId }) => {
     throw err;
   }
 
-  sale.transferConfirmedAt = new Date();
+  // État intermédiaire 2,5 : le virement est confirmé, mais la vente reste à l'étape 2
+  // tant que les données carte grise n'ont pas été collectées et les documents générés.
+  if (!sale.transferConfirmedAt) {
+    sale.transferConfirmedAt = new Date();
+    await sale.save();
+  }
+  return sale;
+};
+
+const processRegistrationCard = async ({ saleId, sellerId, formulaNumber, registrationCardMissingMotif }) => {
+  if (!mongoose.isValidObjectId(saleId)) {
+    const err = new Error('Vente introuvable.');
+    err.codeName = 'sale.not_found';
+    err.statusCode = 404;
+    throw err;
+  }
+
+  const sale = await Sale.findOne({ _id: saleId, seller: sellerId });
+  if (!sale) {
+    const err = new Error('Vente introuvable.');
+    err.codeName = 'sale.not_found';
+    err.statusCode = 404;
+    throw err;
+  }
+  if (sale.status !== 'en_cours' || sale.currentStep !== 2) {
+    const err = new Error("Cette vente n'est plus à l'étape du virement.");
+    err.codeName = 'sale.step_mismatch';
+    throw err;
+  }
+  if (!sale.transferConfirmedAt) {
+    const err = new Error("La réception du virement doit être confirmée avant le traitement de la carte grise.");
+    err.codeName = 'sale.transfer_not_confirmed';
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const vehicle = await VehicleDossier.findById(sale.vehicle).select('registrationCardAvailable');
+  if (!vehicle) {
+    const err = new Error('Dossier du véhicule introuvable.');
+    err.codeName = 'vehicle_dossier.not_found';
+    err.statusCode = 404;
+    throw err;
+  }
+
+  const rawFormulaNumber = typeof formulaNumber === 'string' ? formulaNumber.trim() : '';
+  // Le modal affiche déjà le préfixe « 20 ». Accepte aussi les anciens clients qui
+  // n'envoient que la suite et persiste toujours le numéro complet dans le dossier.
+  const normalizedFormulaNumber = rawFormulaNumber && !rawFormulaNumber.startsWith('20')
+    ? `20${rawFormulaNumber}`
+    : rawFormulaNumber;
+  const normalizedMissingMotif = typeof registrationCardMissingMotif === 'string'
+    ? registrationCardMissingMotif.trim()
+    : '';
+
+  if (vehicle.registrationCardAvailable === true && !normalizedFormulaNumber) {
+    const err = new Error('Le numéro de formule de la carte grise est obligatoire.');
+    err.codeName = 'sale.formula_number_required';
+    err.statusCode = 400;
+    throw err;
+  }
+  if (vehicle.registrationCardAvailable === false && !normalizedMissingMotif) {
+    const err = new Error("Le motif d'absence de carte grise est obligatoire.");
+    err.codeName = 'sale.registration_card_missing_motif_required';
+    err.statusCode = 400;
+    throw err;
+  }
+  if (vehicle.registrationCardAvailable == null) {
+    const err = new Error("La disponibilité de la carte grise n'est pas renseignée dans le dossier du véhicule.");
+    err.codeName = 'sale.registration_card_status_required';
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const registrationCardUpdate = vehicle.registrationCardAvailable === true
+    ? { $set: { formulaNumber: normalizedFormulaNumber }, $unset: { registrationCardMissingMotif: 1 } }
+    : { $set: { registrationCardMissingMotif: normalizedMissingMotif }, $unset: { formulaNumber: 1 } };
+  await VehicleDossier.updateOne({ _id: sale.vehicle }, registrationCardUpdate);
 
   // Le certificat est produit à cet instant précis : il porte la date de cession attestée.
-  // Un échec de génération ne doit pas bloquer la confirmation du vendeur — la vente avance,
-  // et le document sera régénérable.
+  // La vente n'avance que lorsque la génération des documents a réellement abouti.
   let generated = null;
   try {
     generated = await generateCertificate(sale);
   } catch (error) {
     console.error(`Génération du certificat impossible (vente ${sale._id}) : ${error.message}`);
+  }
+  if (!generated) {
+    const err = new Error('La génération des documents a échoué. Vous pouvez relancer le traitement.');
+    err.codeName = 'sale.certificate_generation_failed';
+    err.statusCode = 500;
+    throw err;
   }
 
   // Si le vendeur a configuré son tampon automatique, on produit le document tamponné par le vendeur.
@@ -2369,6 +2451,7 @@ module.exports = {
   listSellerVehicles,
   getSellerSale,
   confirmTransferReceived,
+  processRegistrationCard,
   submitSellerCertificate,
   submitSignedCertificate,
   validateSignedCertificate,

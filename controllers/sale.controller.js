@@ -146,6 +146,24 @@ const confirmTransferReceived = async (req, res, next) => {
   }
 };
 
+const processRegistrationCard = async (req, res, next) => {
+  try {
+    const sale = await saleService.processRegistrationCard({
+      saleId: req.params.id,
+      sellerId: req.user._id,
+      formulaNumber: req.body.formulaNumber,
+      registrationCardMissingMotif: req.body.registrationCardMissingMotif,
+    });
+    res.status(200).json({
+      success: true,
+      message: 'Données de la carte grise enregistrées et documents générés.',
+      sale: await saleService.getSellerSale(sale._id, req.user._id),
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 const validateSignedCertificate = async (req, res, next) => {
   try {
     const sale = await saleService.validateSignedCertificate({
@@ -287,6 +305,7 @@ module.exports = {
   listSellerSales,
   getSellerSale,
   confirmTransferReceived,
+  processRegistrationCard,
   validateSignedCertificate,
   rejectSignedCertificate,
   confirmHandover,
