@@ -1,94 +1,79 @@
-const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
+const fs = require('fs');
+const path = require('path');
+const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
 const { saveBuffer } = require('./storage.service');
 
+const TEMPLATE_PATH = path.join(__dirname, '..', 'assets', 'templates', 'bon_enlevement_vehicule_accidente.pdf');
+const INK = rgb(0.05, 0.1, 0.25);
+
+const fullName = (user) => user?.companyName
+  || [user?.firstName, user?.lastName].filter(Boolean).join(' ')
+  || '';
+
+const addressLine = (address) => {
+  if (!address) return '';
+  if (typeof address === 'string') return address;
+  return [address.street, [address.postalCode, address.city].filter(Boolean).join(' '), address.country]
+    .filter(Boolean)
+    .join(', ');
+};
+
+const fitText = (font, value, maxWidth, initialSize = 9, minimumSize = 6) => {
+  const text = String(value || '')
+    .trim()
+    .replace(/[\u00a0\u202f]/g, ' ')
+    .replace(/[–—]/g, '-');
+  let size = initialSize;
+  while (size > minimumSize && font.widthOfTextAtSize(text, size) > maxWidth) size -= 0.5;
+  return { text, size };
+};
+
+/** Remplit le modèle de bon d'enlèvement fourni à la racine du projet. */
 const generateBonEnlevement = async (sale, vehicle, seller, buyer) => {
-  const pdfDoc = await PDFDocument.create();
-  const page = pdfDoc.addPage([595, 842]); // A4
+  if (!fs.existsSync(TEMPLATE_PATH)) {
+    const error = new Error("Le modèle du bon d'enlèvement est introuvable.");
+    error.codeName = 'handover.template_missing';
+    throw error;
+  }
+
+  const pdfDoc = await PDFDocument.load(fs.readFileSync(TEMPLATE_PATH));
+  const pages = pdfDoc.getPages();
+  if (pages.length !== 1) {
+    const error = new Error("Le modèle du bon d'enlèvement doit contenir une seule page.");
+    error.codeName = 'handover.template_invalid';
+    throw error;
+  }
+
+  const page = pages[0];
   const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
-  const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-
-  const { width, height } = page.getSize();
-  const margin = 50;
-  let cursorY = height - margin;
-
-  const drawText = (text, size, isBold = false, x = margin) => {
-    const activeFont = isBold ? fontBold : font;
-    page.drawText(text || '', {
-      x,
-      y: cursorY,
-      size,
-      font: activeFont,
-      color: rgb(0, 0, 0),
-    });
-    cursorY -= (size + 10);
+  const write = (x, y, value, maxWidth, initialSize = 9) => {
+    const fitted = fitText(font, value, maxWidth, initialSize);
+    if (!fitted.text) return;
+    page.drawText(fitted.text, { x, y, size: fitted.size, font, color: INK });
   };
 
-  // Titre
-  cursorY -= 20;
-  page.drawText("BON D'ENLÈVEMENT", {
-    x: width / 2 - 100,
-    y: cursorY,
-    size: 20,
-    font: fontBold,
-    color: rgb(0, 0, 0),
-  });
-  cursorY -= 40;
+  const now = new Date();
+  const vehicleLabel = [vehicle?.brand, vehicle?.model].filter(Boolean).join(' ');
+  const pickupLocation = vehicle?.vehicleAddress || addressLine(vehicle?.vehicleAddressDetails) || addressLine(seller?.address);
 
-  // Date
-  drawText(`Fait le : ${new Date().toLocaleDateString('fr-FR')}`, 12);
-  cursorY -= 20;
+  write(88, 708, now.toLocaleDateString('fr-FR'), 85);
+  write(222, 708, now.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }), 62);
+  write(391, 708, pickupLocation, 145, 8);
+  write(145, 637, vehicleLabel, 175);
+  write(423, 637, vehicle?.registrationNumber, 115);
+  write(140, 603, vehicle?.vin, 180);
+  write(406, 603, vehicle?.mileage != null ? `${Number(vehicle.mileage).toLocaleString('fr-FR')} km` : '', 130);
+  write(58, 518, fullName(seller), 230);
+  write(311, 518, fullName(buyer), 225);
+  write(115, 497, seller?.phone, 170);
+  write(367, 497, buyer?.phone, 170);
+  write(88, 230, fullName(seller), 165, 8);
+  write(341, 230, fullName(buyer), 165, 8);
 
-  // Véhicule
-  drawText("DÉSIGNATION DU VÉHICULE", 14, true);
-  drawText(`Marque : ${vehicle.brand || ''}`, 12);
-  drawText(`Modèle : ${vehicle.model || ''}`, 12);
-  drawText(`Année : ${vehicle.year || ''}`, 12);
-  drawText(`Numéro de série (VIN) : ${vehicle.vin || ''}`, 12);
-  drawText(`Immatriculation : ${vehicle.registrationNumber || ''}`, 12);
-  cursorY -= 20;
-
-  // Vendeur
-  drawText("VENDEUR", 14, true);
-  drawText(`Nom / Société : ${seller.companyName || seller.firstName + ' ' + seller.lastName}`, 12);
-  drawText(`Adresse : ${seller.address || ''}`, 12);
-  if (seller.siret) drawText(`SIRET : ${seller.siret}`, 12);
-  cursorY -= 20;
-
-  // Acheteur
-  drawText("ACHETEUR", 14, true);
-  drawText(`Nom / Société : ${buyer.companyName || buyer.firstName + ' ' + buyer.lastName}`, 12);
-  drawText(`Adresse : ${buyer.address || ''}`, 12);
-  if (buyer.siret) drawText(`SIRET : ${buyer.siret}`, 12);
-  cursorY -= 30;
-
-  // Déclaration
-  const declarationText = `Je soussigné, ${buyer.companyName || buyer.firstName + ' ' + buyer.lastName}, déclare avoir pris livraison\ndu véhicule désigné ci-dessus, et en assumer l'entière responsabilité à compter de ce jour.`;
-  page.drawText(declarationText, {
-    x: margin,
-    y: cursorY,
-    size: 12,
-    font,
-    color: rgb(0, 0, 0),
-    lineHeight: 16
-  });
-  cursorY -= 60;
-
-  // Signatures
-  drawText("Signature du vendeur :", 12, true, margin);
-  drawText("Signature de l'acheteur :", 12, true, width / 2 + 20);
-
-  // Sauvegarder
-  const pdfBytes = await pdfDoc.save();
+  const buffer = Buffer.from(await pdfDoc.save());
   const filename = `ventes/bon-enlevement/${sale._id}_bon-enlevement.pdf`;
-  const stored = await saveBuffer({ buffer: Buffer.from(pdfBytes), filename, contentType: 'application/pdf' });
-
-  return {
-    url: stored.url,
-    filename: stored.filename,
-    buffer: Buffer.from(pdfBytes)
-  };
+  const stored = await saveBuffer({ buffer, filename, contentType: 'application/pdf' });
+  return { url: stored.url, filename: stored.filename, buffer };
 };
 
-module.exports = {
-  generateBonEnlevement
-};
+module.exports = { generateBonEnlevement, TEMPLATE_PATH };

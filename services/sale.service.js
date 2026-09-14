@@ -445,6 +445,10 @@ const serializeSale = (sale) => {
       url: sale.purchaseDeclaration?.url || null,
       generatedAt: sale.purchaseDeclaration?.generatedAt || null,
     },
+    bonEnlevement: {
+      url: sale.bonEnlevement?.url || null,
+      generatedAt: sale.bonEnlevement?.generatedAt || null,
+    },
     // L'acheteur détient le code : c'est lui qui le communique au vendeur à l'enlèvement
     handover: {
       declarationUrl: sale.handover?.declarationUrl || null,
@@ -1529,34 +1533,19 @@ const notifySaleClosed = async (sale) => {
 /** Code à 6 chiffres tiré d'une source cryptographique. */
 const generateOtp = () => String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
 
-/**
- * Préparer l'enlèvement : la déclaration d'achat est générée et rattachée à la vente,
- * et un OTP unique est tiré. L'acheteur voit le code, le vendeur devra le saisir.
- */
+/** Préparer l'étape 8 en générant uniquement le bon d'enlèvement. */
 const prepareHandover = async (sale) => {
   const [vehicle, seller, buyer] = await Promise.all([
     VehicleDossier.findById(sale.vehicle)
-      .select('brand model year vin registrationNumber vehicleGenre engine registrationCardAvailable')
+      .select('brand model year mileage vin registrationNumber vehicleAddress vehicleAddressDetails')
       .lean(),
-    User.findById(sale.seller).select('firstName lastName companyName siret address stampUrl').lean(),
-    User.findById(sale.winner).select('firstName lastName companyName siret address stampUrl').lean(),
+    User.findById(sale.seller).select('firstName lastName companyName siret address phone').lean(),
+    User.findById(sale.winner).select('firstName lastName companyName siret address phone').lean(),
   ]);
-
-  const pdf = await fillPurchaseDeclaration({
-    vehicle,
-    seller,
-    buyer,
-    purchasedAt: sale.transferConfirmedAt || new Date(),
-  });
-
-  const filename = `ventes/certificats/${sale._id}_declaration-achat.pdf`;
-  const stored = await saveBuffer({ buffer: pdf, filename, contentType: 'application/pdf' });
   const bon = await generateBonEnlevement(sale, vehicle, seller, buyer);
 
   sale.handover = {
     ...(sale.handover?.toObject?.() || sale.handover || {}),
-    declarationUrl: stored.url,
-    declarationFilename: stored.filename,
     generatedAt: new Date(),
     confirmedAt: null,
   };
@@ -1716,6 +1705,10 @@ const getSellerSale = async (saleId, sellerId) => {
       url: sale.purchaseDeclaration?.url || null,
       generatedAt: sale.purchaseDeclaration?.generatedAt || null,
     },
+    bonEnlevement: {
+      url: sale.bonEnlevement?.url || null,
+      generatedAt: sale.bonEnlevement?.generatedAt || null,
+    },
     // L'OTP n'est jamais transmis au vendeur : il doit le tenir de l'acheteur.
     // La déclaration ne lui est ouverte qu'une fois la remise confirmée.
     handover: {
@@ -1803,31 +1796,32 @@ const notifySignatureReady = async (user, signatureUrl, vehicle) => {
   }
 };
 
-/**
- * Prévenir l'acheteur que son certificat de cession est disponible et qu'il doit
- * le signer, le tamponner puis le redéposer.
- */
-const notifyBuyerCertificateReady = async (sale, vehicle) => {
+/** Notifier la personne qui doit agir juste après la fin de la signature électronique. */
+const notifyPostSignatureAction = async (sale, sellerStampApplied) => {
   try {
-    const [buyer, session] = await Promise.all([
-      User.findById(sale.winner).select('email firstName lastName language'),
+    const [seller, buyer, vehicle, session] = await Promise.all([
+      User.findById(sale.seller).select('email firstName lastName language').lean(),
+      User.findById(sale.winner).select('email firstName lastName language').lean(),
+      VehicleDossier.findById(sale.vehicle).select('brand model').lean(),
       Session.findById(sale.session).select('name').lean(),
     ]);
-    if (!buyer) return;
-
-    const email = emailTemplates.saleCertificateReadyEmail({
-      user: buyer,
+    const common = {
       brand: vehicle?.brand || '',
       model: vehicle?.model || '',
-      year: vehicle?.year || null,
-      photoUrl: coverUrl(vehicle),
       sessionName: session?.name || '',
       saleId: String(sale._id),
-    });
+    };
 
-    await sendEmail({ to: buyer.email, subject: email.subject, text: email.text, html: email.html });
+    if (sellerStampApplied && buyer) {
+      const email = emailTemplates.buyerSellerStampValidationEmail({ user: buyer, ...common });
+      await sendEmail({ to: buyer.email, subject: email.subject, text: email.text, html: email.html });
+    } else if (!sellerStampApplied && seller) {
+      const email = emailTemplates.sellerStampRequiredEmail({ user: seller, ...common });
+      await sendEmail({ to: seller.email, subject: email.subject, text: email.text, html: email.html });
+    }
   } catch (error) {
-    console.error(`Notification du certificat impossible (vente ${sale._id}) : ${error.message}`);
+    // La signature et le changement d'étape restent acquis même si le service mail est indisponible.
+    console.error(`Notification post-signature impossible (vente ${sale._id}) : ${error.message}`);
   }
 };
 
@@ -2071,9 +2065,8 @@ const submitSellerCertificate = async ({ saleId, sellerId, url, filename }) => {
   enterStep(sale, 5, null);
   await sale.save();
   
-  // On notifie l'acheteur que le vendeur a déposé son certificat
-  const vehicle = await VehicleDossier.findById(sale.vehicle).lean();
-  await notifyBuyerCertificateReady(sale, vehicle);
+  // Le dossier vendeur est prêt : l'acheteur doit maintenant le valider.
+  await notifyPostSignatureAction(sale, true);
 
   return sale;
 };
@@ -2494,6 +2487,8 @@ const finalizeSignature = async (saleId, signatureId) => {
       enterStep(sale, 4, null);
     }
     await sale.save();
+
+    await notifyPostSignatureAction(sale, Boolean(seller?.stampUrl));
 
     console.log(`Signature finalisée pour la vente ${saleId}. Passage à l'étape ${sale.currentStep}.`);
     return sale;

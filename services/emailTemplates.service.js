@@ -1359,3 +1359,66 @@ const signatureReadyEmail = ({ user, brand, model, signatureUrl }) => {
   };
 };
 module.exports.signatureReadyEmail = signatureReadyEmail;
+
+const sellerStampRequiredEmail = ({ user, brand, model, saleId }) => {
+  const lang = normalizeLanguage(user.language);
+  const vehicleLabel = [brand, model].filter(Boolean).join(' ') || (lang === 'fr' ? 'Véhicule' : 'Vehicle');
+  const url = `${CLIENT_BASE_URL}${SELLER_SALES_PATH[lang]}/${saleId}`;
+  const copy = lang === 'fr' ? {
+    subject: `Tampon vendeur requis — ${vehicleLabel} - DealAutoPro`,
+    heading: 'Ajoutez votre tampon aux documents signés',
+    intro: `La signature électronique des documents de « ${vehicleLabel} » est terminée. Aucun tampon vendeur n’est enregistré sur votre compte.`,
+    action: 'Téléchargez le dossier signé, apposez votre tampon sur le certificat de cession et la déclaration d’achat, puis déposez la version tamponnée dans votre espace.',
+    cta: 'Déposer le dossier tamponné',
+    text: `La signature électronique des documents de ${vehicleLabel} est terminée. Téléchargez le dossier signé, ajoutez votre tampon aux deux documents puis déposez-le ici : ${url}`,
+  } : {
+    subject: `Seller stamp required — ${vehicleLabel} - DealAutoPro`,
+    heading: 'Add your stamp to the signed documents',
+    intro: `Electronic signing for “${vehicleLabel}” is complete. No seller stamp is saved on your account.`,
+    action: 'Download the signed file, stamp the transfer certificate and purchase declaration, then upload the stamped version.',
+    cta: 'Upload the stamped file',
+    text: `Electronic signing for ${vehicleLabel} is complete. Download the signed file, stamp both documents, then upload it here: ${url}`,
+  };
+  return {
+    subject: copy.subject,
+    text: copy.text,
+    html: layout({ heading: copy.heading, footer: lang === 'fr' ? "L'équipe DealAutoPro" : 'The DealAutoPro team', body: `
+      <p style="color:#1A2230;font-size:16px;">${lang === 'fr' ? `Bonjour ${user.firstName} ${user.lastName},` : `Hello ${user.firstName} ${user.lastName},`}</p>
+      <p style="color:#5A5E66;font-size:14px;">${copy.intro}</p>
+      <p style="color:#13243C;font-size:14px;font-weight:bold;">${copy.action}</p>
+      <div style="text-align:center;margin:30px 0;"><a href="${url}" style="background-color:#D9704F;color:white;padding:12px 25px;text-decoration:none;border-radius:5px;font-weight:bold;">${copy.cta}</a></div>` }),
+  };
+};
+
+const buyerSellerStampValidationEmail = ({ user, brand, model, saleId }) => {
+  const lang = normalizeLanguage(user.language);
+  const vehicleLabel = [brand, model].filter(Boolean).join(' ') || (lang === 'fr' ? 'Véhicule' : 'Vehicle');
+  const url = `${CLIENT_BASE_URL}${WON_SALE_PATH[lang]}/${saleId}`;
+  const copy = lang === 'fr' ? {
+    subject: `Documents vendeur à valider — ${vehicleLabel} - DealAutoPro`,
+    heading: 'Le tampon vendeur attend votre validation',
+    intro: `Les documents de « ${vehicleLabel} » ont été signés électroniquement et le tampon du vendeur a été appliqué.`,
+    action: 'Consultez le dossier et validez les documents pour poursuivre la vente.',
+    cta: 'Valider les documents',
+    text: `Les documents signés de ${vehicleLabel} portent maintenant le tampon du vendeur. Consultez-les et validez-les ici : ${url}`,
+  } : {
+    subject: `Seller documents ready for validation — ${vehicleLabel} - DealAutoPro`,
+    heading: 'The seller stamp is ready for your validation',
+    intro: `The documents for “${vehicleLabel}” have been electronically signed and the seller stamp has been applied.`,
+    action: 'Review and validate the documents to continue the sale.',
+    cta: 'Validate the documents',
+    text: `The signed documents for ${vehicleLabel} now include the seller stamp. Review and validate them here: ${url}`,
+  };
+  return {
+    subject: copy.subject,
+    text: copy.text,
+    html: layout({ heading: copy.heading, footer: lang === 'fr' ? "L'équipe DealAutoPro" : 'The DealAutoPro team', body: `
+      <p style="color:#1A2230;font-size:16px;">${lang === 'fr' ? `Bonjour ${user.firstName} ${user.lastName},` : `Hello ${user.firstName} ${user.lastName},`}</p>
+      <p style="color:#5A5E66;font-size:14px;">${copy.intro}</p>
+      <p style="color:#13243C;font-size:14px;font-weight:bold;">${copy.action}</p>
+      <div style="text-align:center;margin:30px 0;"><a href="${url}" style="background-color:#2F6F4F;color:white;padding:12px 25px;text-decoration:none;border-radius:5px;font-weight:bold;">${copy.cta}</a></div>` }),
+  };
+};
+
+module.exports.sellerStampRequiredEmail = sellerStampRequiredEmail;
+module.exports.buyerSellerStampValidationEmail = buyerSellerStampValidationEmail;
