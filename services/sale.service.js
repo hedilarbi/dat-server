@@ -15,6 +15,7 @@ const { fillPurchaseDeclaration } = require('./purchaseDeclaration.service');
 const { saveBuffer } = require('./storage.service');
 const { generateBonEnlevement } = require('./handoverDocument.service');
 const { createSignatureSession, fetchSignedDocument, fetchAuditTrail } = require('./esignature.service');
+const { stampSignedBundle } = require('./signedDocumentStamp.service');
 const { isStripeConfigured } = require('../config/stripe');
 
 const CLOSED_SESSION_STATUSES = ['closed', 'cloturee'];
@@ -1442,6 +1443,8 @@ const rejectSignedCertificate = async ({ saleId, sellerId, reason, comment }) =>
     signedFilename: null,
     signedAt: null,
   };
+  sale.esignature.buyerStampedUrl = null;
+  sale.esignature.buyerStampedFilename = null;
   enterStep(sale, 6, null); // Retour au tampon acheteur pour un nouveau dépôt
   await sale.save();
 
@@ -1765,8 +1768,8 @@ const generateCertificate = async (sale) => {
 
   const pdf = await fillCertificateOfTransfer({
     vehicle,
-    seller,
-    buyer,
+    seller: { ...seller, stampUrl: null },
+    buyer: { ...buyer, stampUrl: null },
     transferredAt: sale.transferConfirmedAt || new Date(),
   });
 
@@ -1871,8 +1874,8 @@ const confirmTransferReceived = async ({ saleId, sellerId }) => {
 const generatePurchaseDeclarationDoc = async (sale, vehicle, seller, buyer) => {
   const pdf = await fillPurchaseDeclaration({
     vehicle,
-    seller,
-    buyer,
+    seller: { ...seller, stampUrl: null },
+    buyer: { ...buyer, stampUrl: null },
     purchasedAt: sale.transferConfirmedAt || new Date(),
   });
 
@@ -1995,8 +1998,6 @@ const processRegistrationCard = async ({ saleId, sellerId, formulaNumber, regist
       sellerUrl: sellerSigner ? sellerSigner.url : null,
       buyerUrl: buyerSigner ? buyerSigner.url : null,
       initiatedAt: new Date(),
-      sellerStampIncluded: Boolean(generatedCert.seller.stampUrl),
-      buyerStampIncluded: Boolean(generatedCert.buyer.stampUrl),
     };
 
     // On passe à l'étape 3 (attente de signature)
@@ -2060,6 +2061,8 @@ const submitSellerCertificate = async ({ saleId, sellerId, url, filename }) => {
   sale.certificate.sellerSignedUrl = url;
   sale.certificate.sellerSignedFilename = filename;
   sale.certificate.sellerSignedAt = new Date();
+  sale.esignature.sellerStampedUrl = url;
+  sale.esignature.sellerStampedFilename = filename || null;
   if (sale.certificate.lastRejection?.rejectedBy === 'buyer') {
     sale.certificate.lastRejection = null;
   }
@@ -2106,11 +2109,19 @@ const validateSellerCertificate = async ({ saleId, buyerId }) => {
     ...(sale.certificate?.lastRejection?.rejectedBy === 'buyer' ? { lastRejection: null } : {}),
   };
 
-  if (sale.esignature?.buyerStampIncluded) {
-    // Le tampon acheteur était déjà présent dans le dossier envoyé à la signature.
-    // On conserve donc le PDF signé intact afin de ne pas invalider sa signature PAdES.
-    sale.certificate.signedUrl = sale.certificate.sellerSignedUrl || sale.esignature?.signedDocumentUrl;
-    sale.certificate.signedFilename = sale.esignature?.signedDocumentFilename || null;
+  const buyer = await User.findById(buyerId).select('stampUrl').lean();
+  if (buyer?.stampUrl) {
+    const sourceUrl = sale.esignature?.sellerStampedUrl || sale.certificate.sellerSignedUrl;
+    const stampedPdf = await stampSignedBundle({ sourceUrl, stampUrl: buyer.stampUrl, role: 'buyer' });
+    const stored = await saveBuffer({
+      buffer: stampedPdf,
+      filename: `ventes/documents/${sale._id}/dossier-signe-tampons-vendeur-acheteur.pdf`,
+      contentType: 'application/pdf',
+    });
+    sale.esignature.buyerStampedUrl = stored.url;
+    sale.esignature.buyerStampedFilename = stored.filename;
+    sale.certificate.signedUrl = stored.url;
+    sale.certificate.signedFilename = stored.filename;
     sale.certificate.signedAt = new Date();
     
     enterStep(sale, 7, null);
@@ -2160,6 +2171,10 @@ const rejectSellerCertificate = async ({ saleId, buyerId, reason, comment }) => 
   sale.certificate.sellerSignedFilename = null;
   sale.certificate.sellerSignedAt = null;
   sale.certificate.buyerValidatedAt = null;
+  sale.esignature.sellerStampedUrl = null;
+  sale.esignature.sellerStampedFilename = null;
+  sale.esignature.buyerStampedUrl = null;
+  sale.esignature.buyerStampedFilename = null;
 
   enterStep(sale, 4, null); // Retour au tampon vendeur
   await sale.save();
@@ -2208,6 +2223,8 @@ const submitSignedCertificate = async ({ saleId, buyerId, url, filename }) => {
     signedAt: new Date(),
     ...(sale.certificate?.lastRejection?.rejectedBy === 'seller' ? { lastRejection: null } : {}),
   };
+  sale.esignature.buyerStampedUrl = url;
+  sale.esignature.buyerStampedFilename = filename || null;
   // Le vendeur doit maintenant vérifier les documents déposés
   enterStep(sale, 7, null);
   await sale.save();
@@ -2454,11 +2471,23 @@ const finalizeSignature = async (saleId, signatureId) => {
       completedAt: new Date(),
     };
 
-    // Le PDF signé reste intact. Si le vendeur avait déjà enregistré son tampon, celui-ci
-    // faisait partie du document envoyé à OpenAPI et l'étape 4 est automatiquement satisfaite.
-    if (sale.esignature?.sellerStampIncluded) {
-      sale.certificate.sellerSignedUrl = finalUrl;
-      sale.certificate.sellerSignedFilename = stored.filename;
+    // L'original OpenAPI reste archivé sans modification. L'étape 4 travaille sur une copie.
+    const seller = await User.findById(sale.seller).select('stampUrl').lean();
+    if (seller?.stampUrl) {
+      const sellerStampedPdf = await stampSignedBundle({
+        sourceBuffer: signedPdfBuffer,
+        stampUrl: seller.stampUrl,
+        role: 'seller',
+      });
+      const sellerStamped = await saveBuffer({
+        buffer: sellerStampedPdf,
+        filename: `ventes/documents/${saleId}/dossier-signe-tampon-vendeur.pdf`,
+        contentType: 'application/pdf',
+      });
+      sale.esignature.sellerStampedUrl = sellerStamped.url;
+      sale.esignature.sellerStampedFilename = sellerStamped.filename;
+      sale.certificate.sellerSignedUrl = sellerStamped.url;
+      sale.certificate.sellerSignedFilename = sellerStamped.filename;
       sale.certificate.sellerSignedAt = new Date();
       enterStep(sale, 5, null);
     } else {
