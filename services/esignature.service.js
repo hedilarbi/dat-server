@@ -2,8 +2,21 @@ const axios = require('axios');
 const fs = require('fs');
 const { getSignedUrl } = require('./storage.service');
 
-const ESIGNATURE_BASE_URL = process.env.ESIGNATURE_BASE_URL || 'https://test.esignature.openapi.com';
-const ESIGNATURE_API_URL = `${ESIGNATURE_BASE_URL}/EU-SES`;
+const requiredUrl = (name) => {
+  const raw = process.env[name]?.trim();
+  if (!raw) throw new Error(`${name} manquant dans les variables d'environnement`);
+
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error(`${name} doit être une URL valide`);
+  }
+  if (process.env.NODE_ENV === 'production' && parsed.protocol !== 'https:') {
+    throw new Error(`${name} doit utiliser HTTPS en production`);
+  }
+  return raw.replace(/\/+$/, '');
+};
 
 /**
  * Convertit un buffer PDF ou une URL en base64 pour OpenAPI
@@ -21,9 +34,10 @@ const createSignatureSession = async ({ saleId, seller, buyer, certificateBuffer
     throw new Error('ESIGNATURE_TOKEN manquant dans les variables d\'environnement');
   }
 
-  const baseUrl = process.env.APP_BASE_URL || 'https://votre-domaine.com';
-  const webhookSecret = process.env.ESIGNATURE_WEBHOOK_SECRET;
-  if (process.env.NODE_ENV === 'production' && !webhookSecret) {
+  const esignatureBaseUrl = requiredUrl('ESIGNATURE_BASE_URL');
+  const baseUrl = requiredUrl('APP_BASE_URL');
+  const webhookSecret = process.env.ESIGNATURE_WEBHOOK_SECRET?.trim();
+  if (!webhookSecret) {
     throw new Error('ESIGNATURE_WEBHOOK_SECRET manquant dans les variables d\'environnement');
   }
 
@@ -80,7 +94,7 @@ const createSignatureSession = async ({ saleId, seller, buyer, certificateBuffer
   };
 
   try {
-    const response = await axios.post(ESIGNATURE_API_URL, payload, {
+    const response = await axios.post(`${esignatureBaseUrl}/EU-SES`, payload, {
       headers: {
         'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json'
@@ -119,8 +133,9 @@ const fetchSignedDocument = async (signatureId) => {
     throw new Error('ESIGNATURE_TOKEN manquant dans les variables d\'environnement');
   }
 
+  const esignatureBaseUrl = requiredUrl('ESIGNATURE_BASE_URL');
   try {
-    const response = await axios.get(`${ESIGNATURE_BASE_URL}/signatures/${signatureId}/signedDocument`, {
+    const response = await axios.get(`${esignatureBaseUrl}/signatures/${signatureId}/signedDocument`, {
       headers: {
         'Authorization': `Bearer ${token}`
       },
@@ -138,7 +153,8 @@ const fetchAuditTrail = async (signatureId) => {
   const token = process.env.ESIGNATURE_TOKEN;
   if (!token) throw new Error('ESIGNATURE_TOKEN manquant dans les variables d\'environnement');
 
-  const response = await axios.get(`${ESIGNATURE_BASE_URL}/signatures/${signatureId}/audit`, {
+  const esignatureBaseUrl = requiredUrl('ESIGNATURE_BASE_URL');
+  const response = await axios.get(`${esignatureBaseUrl}/signatures/${signatureId}/audit`, {
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/pdf' },
     responseType: 'arraybuffer',
   });
