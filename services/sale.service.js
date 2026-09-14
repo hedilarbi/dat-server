@@ -876,7 +876,7 @@ const reconcilePendingCommissionPayments = async () => {
  *   validation_vendeur  le vendeur valide le certificat déposé par l'acheteur
  *   enlevement          le vendeur saisit le code remis par l'acheteur
  */
-const SELLER_ACTION_STEPS = ['virement_carte_grise', 'tampon_vendeur', 'validation_vendeur', 'enlevement'];
+const SELLER_ACTION_STEPS = ['virement_carte_grise', 'signature_electronique', 'tampon_vendeur', 'validation_vendeur', 'enlevement'];
 
 const REMINDER_THRESHOLDS = [50, 80];
 
