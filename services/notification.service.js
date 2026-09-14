@@ -52,6 +52,32 @@ const createAdminVehicleDossierNotification = async (dossier, seller) => {
   });
 };
 
+/**
+ * Un véhicule vient d'atteindre le nombre de mises en vente autorisé (Configuration >
+ * Configuration générale, champ « Tentatives de mise en vente ») sans trouver preneur : il
+ * réclame une décision commerciale (baisse du prix de réserve, retrait...).
+ */
+const createAdminVehicleMaxAttemptsNotification = async (dossier, seller, listingCount) => {
+  const vehicleLabel = [dossier.brand, dossier.model].filter(Boolean).join(' ') || 'Véhicule';
+  const sellerLabel = seller?.companyName || [seller?.firstName, seller?.lastName].filter(Boolean).join(' ') || 'Un vendeur';
+
+  return Notification.create({
+    recipientRole: 'admin',
+    type: 'vehicle_max_attempts_reached',
+    category: 'dossier_vehicule',
+    title: 'Véhicule invendu à plusieurs reprises',
+    message: `Le véhicule ${vehicleLabel} de ${sellerLabel} a été mis en vente ${listingCount} fois sans trouver preneur.`,
+    createdByUser: seller?._id,
+    metadata: {
+      dossierId: dossier._id.toString(),
+      sellerId: seller?._id ? seller._id.toString() : null,
+      companyName: seller?.companyName || null,
+      vehicleLabel,
+      listingCount
+    }
+  });
+};
+
 const createAdminTicketNotification = async (ticket, user) => {
   return Notification.create({
     recipientRole: 'admin',
@@ -134,6 +160,7 @@ module.exports = {
   getAdminNotifications,
   createAdminRegistrationNotification,
   createAdminVehicleDossierNotification,
+  createAdminVehicleMaxAttemptsNotification,
   createAdminTicketNotification,
   createAdminLatePaymentNotification,
   createAdminCertificateRejectedNotification,

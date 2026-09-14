@@ -366,7 +366,9 @@ const adminListDossiers = async (filters = {}) => {
 };
 
 const adminGetDossierById = async (dossierId) => {
-  const dossier = await VehicleDossier.findById(dossierId).populate('seller', 'companyName email firstName lastName phone language expoPushToken');
+  const dossier = await VehicleDossier.findById(dossierId)
+    .populate('seller', 'companyName email firstName lastName phone language expoPushToken')
+    .populate('session', 'name startDate endDate status');
   if (!dossier) {
     const error = new Error('Dossier véhicule introuvable.');
     error.statusCode = 404;

@@ -95,7 +95,7 @@ const submitSignedCertificate = async (req, res, next) => {
     });
     res.status(200).json({
       success: true,
-      message: 'Certificat signé déposé. Le vendeur va le vérifier.',
+      message: 'Dossier signé et tamponné déposé. Le vendeur va le vérifier.',
       sale: await saleService.getBuyerSale(sale._id, req.user._id),
     });
   } catch (error) {
@@ -113,7 +113,7 @@ const submitSellerCertificate = async (req, res, next) => {
     });
     res.status(200).json({
       success: true,
-      message: 'Certificat signé déposé.',
+      message: 'Dossier signé et tamponné déposé.',
       sale: await saleService.getSellerSale(sale._id, req.user._id),
     });
   } catch (error) {
@@ -172,7 +172,7 @@ const validateSignedCertificate = async (req, res, next) => {
     });
     res.status(200).json({
       success: true,
-      message: 'Certificat validé. La procédure passe à l’enlèvement du véhicule.',
+      message: 'Documents validés. Le bon d’enlèvement est maintenant disponible.',
       sale: await saleService.getSellerSale(sale._id, req.user._id),
     });
   } catch (error) {
@@ -224,32 +224,6 @@ const cancelSaleByBuyer = async (req, res, next) => {
     res.status(200).json({
       success: true,
       message: 'Vente annulée et compte suspendu.',
-      sale,
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-const acceptPromotion = async (req, res, next) => {
-  try {
-    const sale = await saleService.acceptPromotion(req.params.id, req.user._id);
-    res.status(200).json({
-      success: true,
-      message: 'Proposition acceptée. Vous pouvez maintenant procéder au paiement de la commission.',
-      sale: await saleService.getBuyerSale(sale._id, req.user._id),
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-const refusePromotion = async (req, res, next) => {
-  try {
-    const sale = await saleService.refusePromotion(req.params.id, req.user._id);
-    res.status(200).json({
-      success: true,
-      message: 'Proposition déclinée sans pénalité.',
       sale,
     });
   } catch (error) {
@@ -310,6 +284,4 @@ module.exports = {
   rejectSignedCertificate,
   confirmHandover,
   cancelSaleByBuyer,
-  acceptPromotion,
-  refusePromotion,
 };

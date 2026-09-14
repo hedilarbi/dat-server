@@ -104,6 +104,7 @@ app.use('/api/sessions', require('./routes/session.routes'));
 app.use('/api/offers', require('./routes/offer.routes'));
 app.use('/api/sales', require('./routes/sale.routes'));
 app.use('/api/public', require('./routes/publicSales.routes'));
+app.use('/api/webhooks', require('./routes/webhook.routes'));
 
 // Service de fichiers statiques (fallback local si nécessaire)
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));

@@ -11,7 +11,6 @@ const FIELDS = [
   { key: 'commissionPaymentDeadlineHours', label: 'Le délai de paiement de la commission', type: 'number' },
   { key: 'bankTransferDeadlineHours', label: 'Le délai de virement', type: 'number' },
   { key: 'vehicleListingAttempts', label: 'Le nombre de tentatives de mise en vente', type: 'number' },
-  { key: 'nextWinnerAcceptanceDeadlineHours', label: 'Le délai pour le gagnant suivant', type: 'number' },
   { key: 'accountReactivationFee', label: 'Les frais de dossier de réactivation', type: 'number' },
   { key: 'adminEmail', label: "L'adresse email de l'administrateur", type: 'email' },
 ];

@@ -1,6 +1,9 @@
 const Session = require('../models/session.model');
 const SessionConfig = require('../models/sessionConfig.model');
+const User = require('../models/user.model');
 const commissionService = require('./commission.service');
+const generalConfigService = require('./generalConfig.service');
+const notificationService = require('./notification.service');
 const { nextLotNumber } = require('../models/counter.model');
 
 /**
@@ -156,6 +159,20 @@ const autoGenerateAndSyncSessions = async () => {
 };
 
 /**
+ * Prévenir l'administrateur (centre de notifications in-app) qu'un véhicule vient d'atteindre
+ * le nombre de mises en vente autorisé sans trouver preneur. Un échec d'envoi ne doit jamais
+ * faire échouer l'affectation elle-même.
+ */
+const notifyAdminOfMaxAttempts = async (vehicle, listingCount) => {
+  try {
+    const seller = await User.findById(vehicle.seller).select('companyName firstName lastName');
+    await notificationService.createAdminVehicleMaxAttemptsNotification(vehicle, seller, listingCount);
+  } catch (err) {
+    console.error(`Erreur lors de la notification admin (tentatives max, véhicule ${vehicle._id}) : ${err.message}`);
+  }
+};
+
+/**
  * Publier un véhicule dans une session. L'affectation est toujours déclenchée manuellement
  * depuis l'interface admin, et incrémente le compteur de tentatives de vente du véhicule
  * (cahier des charges §6.11). Une réaffectation à la même session — après un retrait par
@@ -163,7 +180,8 @@ const autoGenerateAndSyncSessions = async () => {
  *
  * Le nombre de tentatives autorisées (Configuration > Configuration générale) ne bloque pas
  * l'affectation : c'est un repère affiché à l'administrateur, qui reste libre de republier
- * un véhicule au-delà.
+ * un véhicule au-delà. Dès que ce nombre est atteint, l'admin en est prévenu par notification
+ * — le véhicule réclame alors une décision commerciale (baisse du prix, retrait...).
  */
 const assignVehicleToSession = async (vehicle, sessionId) => {
   const sessionKey = String(sessionId);
@@ -179,6 +197,15 @@ const assignVehicleToSession = async (vehicle, sessionId) => {
   }
 
   await vehicle.save();
+
+  if (isNewListing) {
+    const { vehicleListingAttempts } = await generalConfigService.getConfig();
+    const threshold = Number(vehicleListingAttempts) || 3;
+    if (vehicle.listingCount === threshold) {
+      await notifyAdminOfMaxAttempts(vehicle, vehicle.listingCount);
+    }
+  }
+
   return vehicle;
 };
 

@@ -210,6 +210,30 @@ const adminListVehicleSales = async (filters = {}) => {
             // dans /dossiers doit rester affichable ici. Seuls la session et la vente sont
             // remplacées par un résumé, et les pièces jointes retirées.
             $addFields: {
+              coverPhotoUrl: {
+                $let: {
+                  vars: {
+                    coverPhoto: {
+                      $ifNull: [
+                        {
+                          $arrayElemAt: [
+                            {
+                              $filter: {
+                                input: { $ifNull: ['$photos', []] },
+                                as: 'photo',
+                                cond: { $eq: ['$$photo.isCover', true] },
+                              },
+                            },
+                            0,
+                          ],
+                        },
+                        { $arrayElemAt: [{ $ifNull: ['$photos', []] }, 0] },
+                      ],
+                    },
+                  },
+                  in: { $ifNull: ['$$coverPhoto.processedUrl', '$$coverPhoto.originalUrl'] },
+                },
+              },
               session: {
                 $cond: [
                   { $ifNull: ['$sessionDoc._id', false] },

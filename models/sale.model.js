@@ -13,13 +13,14 @@ const CERTIFICATE_REJECTION_REASONS = [
 
 // Étapes de la procédure d'achat suivie par le gagnant, dans l'ordre.
 const PURCHASE_STEPS = [
-  'commission',          // 1. Paiement de la commission + choix de remise des papiers
-  'virement',            // 2. Virement du prix du véhicule au vendeur
-  'certificat_vendeur',  // 3. Certificat téléchargé, signé et redéposé par le vendeur (ou auto)
-  'validation_acheteur', // 4. Acheteur valide le certificat du vendeur
-  'certificat_acheteur', // 5. Certificat téléchargé, signé et redéposé par l'acheteur (ou auto)
-  'validation_vendeur',  // 6. Confirmation des documents par le vendeur
-  'enlevement',          // 7. Mandat d'enlèvement, OTP et clôture de la vente
+  'commission',             // 1. Paiement de la commission par l'acheteur
+  'virement_carte_grise',   // 2. Virement confirmé et dernière information carte grise
+  'signature_electronique', // 3. Signature électronique du dossier par les deux parties
+  'tampon_vendeur',         // 4. Tampon automatique ou dépôt manuel du vendeur
+  'validation_acheteur',    // 5. Validation des documents vendeur par l'acheteur
+  'tampon_acheteur',        // 6. Tampon automatique ou dépôt manuel de l'acheteur
+  'validation_vendeur',     // 7. Validation finale des documents par le vendeur
+  'enlevement',             // 8. Bon d'enlèvement, remise et clôture
 ];
 
 /**
@@ -36,7 +37,7 @@ const waitingListEntrySchema = new mongoose.Schema({
   rank: { type: Number, required: true, min: 1 },
   status: {
     type: String,
-    enum: ['gagnant', 'en_attente', 'ecarte', 'en_attente_confirmation', 'refuse_proposition'],
+    enum: ['gagnant', 'en_attente', 'ecarte'],
     default: 'en_attente'
   },
   discardedAt: { type: Date },
@@ -75,7 +76,7 @@ const saleSchema = new mongoose.Schema({
 
   status: {
     type: String,
-    enum: ['en_cours', 'cloturee', 'sans_gagnant', 'annulee', 'en_attente_confirmation'],
+    enum: ['en_cours', 'cloturee', 'sans_gagnant', 'annulee'],
     default: 'en_cours'
   },
   // Position dans PURCHASE_STEPS (1 = paiement de la commission)
@@ -119,7 +120,7 @@ const saleSchema = new mongoose.Schema({
   // Étape 2 : le virement est fait hors plateforme, le vendeur en confirme la réception
   transferConfirmedAt: { type: Date, default: null },
 
-  // Étape 3 : certificat de cession généré par la plateforme, puis redéposé signé et tamponné
+  // Documents et versions tamponnées utilisés entre les étapes 3 et 7.
   certificate: {
     url: { type: String, default: null },
     filename: { type: String, default: null },
@@ -154,15 +155,42 @@ const saleSchema = new mongoose.Schema({
     }
   },
 
-  // Étape 5 : déclaration d'achat générée, remise au vendeur contre l'OTP détenu par l'acheteur
+  // Déclaration d'achat Cerfa 13751*02, générée avec le certificat dès l'étape 3.
+  purchaseDeclaration: {
+    url: { type: String, default: null },
+    filename: { type: String, default: null },
+    generatedAt: { type: Date, default: null }
+  },
+
+  // Documents disponibles lors de l'étape 8 (enlèvement).
   handover: {
     declarationUrl: { type: String, default: null },
     declarationFilename: { type: String, default: null },
     generatedAt: { type: Date, default: null },
-    // Code à usage unique affiché à l'acheteur et saisi par le vendeur lors de l'enlèvement
-    otp: { type: String, default: null },
-    otpAttempts: { type: Number, default: 0 },
     confirmedAt: { type: Date, default: null }
+  },
+
+  // Document Bon d'enlèvement
+  bonEnlevement: {
+    url: { type: String, default: null },
+    filename: { type: String, default: null },
+    generatedAt: { type: Date, default: null }
+  },
+
+  // Intégration Signature Électronique (OpenAPI)
+  esignature: {
+    operationId: { type: String, default: null },
+    status: { type: String, default: null }, // ex: WAIT_VALIDATION, SIGNED, ERROR
+    sellerUrl: { type: String, default: null },
+    buyerUrl: { type: String, default: null },
+    initiatedAt: { type: Date, default: null },
+    sellerStampIncluded: { type: Boolean, default: false },
+    buyerStampIncluded: { type: Boolean, default: false },
+    signedDocumentUrl: { type: String, default: null },
+    signedDocumentFilename: { type: String, default: null },
+    auditUrl: { type: String, default: null },
+    auditFilename: { type: String, default: null },
+    completedAt: { type: Date, default: null }
   },
 
   wonAt: { type: Date },

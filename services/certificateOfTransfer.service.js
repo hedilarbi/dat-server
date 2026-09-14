@@ -269,6 +269,7 @@ const fillCertificateOfTransfer = async ({ vehicle, seller, buyer, transferredAt
 
 module.exports = {
   fillCertificateOfTransfer,
+  drawStamp,
   splitStreet,
   TEMPLATE_PATH,
 };

@@ -24,12 +24,6 @@ const generalConfigSchema = new mongoose.Schema({
     default: 3,
     min: 1,
   },
-  // Délai laissé au gagnant suivant pour accepter ou refuser le véhicule.
-  nextWinnerAcceptanceDeadlineHours: {
-    type: Number,
-    default: 24,
-    min: 1,
-  },
   // Frais de dossier pour réactiver un compte suspendu (en euros).
   accountReactivationFee: {
     type: Number,

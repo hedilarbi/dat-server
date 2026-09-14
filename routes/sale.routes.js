@@ -19,21 +19,21 @@ router.post('/:id/transfer-received', vendeurOnly, saleController.confirmTransfe
 // Étape 2,5 : collecte des données carte grise, puis génération des documents
 router.post('/:id/registration-card', vendeurOnly, saleController.processRegistrationCard);
 
-// Étape 3 : le vendeur redépose le certificat de cession signé et tamponné (s'il n'a pas de tampon auto)
+// Étape 4 : le vendeur dépose le dossier signé et tamponné s'il n'a pas de tampon auto
 router.post('/:id/certificate/seller', vendeurOnly, saleController.submitSellerCertificate);
 
-// Étape 4 : l'acheteur valide le certificat déposé par le vendeur
+// Étape 5 : l'acheteur valide le dossier tamponné par le vendeur
 router.post('/:id/seller-certificate/validate', acheteurOnly, saleController.validateSellerCertificate);
 router.post('/:id/seller-certificate/reject', acheteurOnly, saleController.rejectSellerCertificate);
 
-// Étape 4 : l'acheteur redépose le certificat de cession signé et tamponné
+// Étape 6 : l'acheteur dépose le dossier signé et tamponné s'il n'a pas de tampon auto
 router.post('/:id/certificate', acheteurOnly, saleController.submitSignedCertificate);
 
-// Étape 4 : le vendeur atteste que le certificat déposé est bien signé et tamponné
+// Étape 7 : le vendeur effectue la validation finale des documents
 router.post('/:id/certificate/validate', vendeurOnly, saleController.validateSignedCertificate);
 router.post('/:id/certificate/reject', vendeurOnly, saleController.rejectSignedCertificate);
 
-// Étape 5 : le vendeur saisit l'OTP de l'acheteur pour attester la remise et clôturer la vente
+// Étape 8 : le vendeur atteste la remise du véhicule et clôture la vente
 router.post('/:id/handover', vendeurOnly, saleController.confirmHandover);
 
 // Détail d'une vente remportée, avec l'avancement de la procédure d'achat.
@@ -50,9 +50,5 @@ router.post('/:id/commission/confirm', acheteurOnly, saleController.confirmCommi
 
 // Annulation par l'acheteur à l'étape 1
 router.put('/:id/cancel-buyer', acheteurOnly, saleController.cancelSaleByBuyer);
-
-// Confirmation / Refus de réattribution pour le candidat suivant (sans pénalité en cas de refus)
-router.post('/:id/accept-promotion', acheteurOnly, saleController.acceptPromotion);
-router.post('/:id/refuse-promotion', acheteurOnly, saleController.refusePromotion);
 
 module.exports = router;

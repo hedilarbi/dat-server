@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
-const { splitStreet } = require('./certificateOfTransfer.service');
+const { drawStamp, splitStreet } = require('./certificateOfTransfer.service');
 
 // Formulaire officiel Cerfa 13751*02, livré avec le dépôt.
 const TEMPLATE_PATH = path.join(__dirname, '..', 'assets', 'declaration-achat.pdf');
@@ -179,6 +179,15 @@ const fillPurchaseDeclaration = async ({ vehicle, seller, buyer, purchasedAt }) 
   write(LAYOUT.seller.signedDay, day);
   write(LAYOUT.seller.signedMonth, month);
   write(LAYOUT.seller.signedYear, year);
+
+  // Cachets des deux professionnels, dans leurs cadres de signature respectifs.
+  // Les coordonnées pdf-lib partent du bas de la page.
+  if (buyer?.stampUrl) {
+    await drawStamp(pdf, page, buyer.stampUrl, { x: 370, y: 385 }, 145, 55);
+  }
+  if (seller?.stampUrl) {
+    await drawStamp(pdf, page, seller.stampUrl, { x: 370, y: 75 }, 145, 55);
+  }
 
   return Buffer.from(await pdf.save());
 };

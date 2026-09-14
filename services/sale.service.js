@@ -13,6 +13,8 @@ const crypto = require('crypto');
 const { fillCertificateOfTransfer } = require('./certificateOfTransfer.service');
 const { fillPurchaseDeclaration } = require('./purchaseDeclaration.service');
 const { saveBuffer } = require('./storage.service');
+const { generateBonEnlevement } = require('./handoverDocument.service');
+const { createSignatureSession, fetchSignedDocument, fetchAuditTrail } = require('./esignature.service');
 const { isStripeConfigured } = require('../config/stripe');
 
 const CLOSED_SESSION_STATUSES = ['closed', 'cloturee'];
@@ -72,6 +74,51 @@ const notifyWinner = async (sale, vehicle, session, deadlineHours) => {
 };
 
 /**
+ * Nombre de candidats prévenus qu'ils sont en liste d'attente, gagnant compris : les rangs 2
+ * et 3 reçoivent l'e-mail, au-delà la probabilité d'être appelé ne le justifie plus.
+ */
+const WAITING_LIST_NOTIFIED_RANKS = 3;
+
+/**
+ * Prévenir les meilleurs offrants suivants qu'ils sont en liste d'attente. Leur offre n'est
+ * pas perdue : elle reprend la main si le gagnant est écarté (délai dépassé, règles non
+ * respectées). Comme les autres notifications, un échec d'envoi n'interrompt pas l'attribution.
+ */
+const notifyWaitingList = async (sale, vehicle, session) => {
+  const runnersUp = (sale.waitingList || []).filter(
+    (entry) => entry.rank > 1 && entry.rank <= WAITING_LIST_NOTIFIED_RANKS,
+  );
+  if (runnersUp.length === 0) return;
+
+  const buyers = await User.find({ _id: { $in: runnersUp.map((entry) => entry.buyer) } })
+    .select('email firstName lastName language')
+    .lean();
+  const buyersById = new Map(buyers.map((buyer) => [String(buyer._id), buyer]));
+
+  for (const entry of runnersUp) {
+    try {
+      const buyer = buyersById.get(String(entry.buyer));
+      if (!buyer) continue;
+
+      const email = emailTemplates.saleWaitingListEmail({
+        user: buyer,
+        brand: vehicle?.brand || '',
+        model: vehicle?.model || '',
+        year: vehicle?.year || null,
+        photoUrl: coverUrl(vehicle),
+        sessionName: session.name,
+        rank: entry.rank,
+        amount: entry.amount,
+      });
+
+      await sendEmail({ to: buyer.email, subject: email.subject, text: email.text, html: email.html });
+    } catch (error) {
+      console.error(`Notification de liste d'attente impossible (vente ${sale._id}, rang ${entry.rank}) : ${error.message}`);
+    }
+  }
+};
+
+/**
  * Prévenir le vendeur que l'enchère sur son véhicule est close et qu'une offre a été retenue.
  * Comme pour le gagnant, un échec d'envoi n'interrompt jamais l'attribution.
  */
@@ -121,37 +168,6 @@ const notifySellerUnsold = async (sale, vehicle, session, { bestOffer, offerCoun
     await sendEmail({ to: seller.email, subject: email.subject, text: email.text, html: email.html });
   } catch (error) {
     console.error(`Notification d'invendu impossible (vente ${sale._id}) : ${error.message}`);
-  }
-};
-
-/**
- * Prévenir le vendeur que la commission est réglée et que le virement est désormais attendu
- * sur son compte. Comme les autres notifications, un échec d'envoi n'interrompt rien.
- */
-const notifySellerCommissionPaid = async (sale, deadlineHours) => {
-  try {
-    const [seller, populated] = await Promise.all([
-      User.findById(sale.seller).select('email firstName lastName language'),
-      Sale.findById(sale._id).populate('vehicle', 'brand model year photos').populate('session', 'name').lean(),
-    ]);
-    if (!seller) return;
-
-    const vehicle = populated?.vehicle;
-    const email = emailTemplates.saleCommissionPaidSellerEmail({
-      user: seller,
-      brand: vehicle?.brand || '',
-      model: vehicle?.model || '',
-      year: vehicle?.year || null,
-      photoUrl: coverUrl(vehicle),
-      sessionName: populated?.session?.name || '',
-      amount: sale.amount,
-      saleId: String(sale._id),
-      deadlineHours,
-    });
-
-    await sendEmail({ to: seller.email, subject: email.subject, text: email.text, html: email.html });
-  } catch (error) {
-    console.error(`Notification du vendeur impossible (vente ${sale._id}) : ${error.message}`);
   }
 };
 
@@ -234,6 +250,7 @@ const attributeVehicle = async (vehicle, session) => {
 
   await notifyWinner(sale, vehicle, session, deadlineHours);
   await notifySellerAwarded(sale, vehicle, session);
+  await notifyWaitingList(sale, vehicle, session);
   return sale;
 };
 
@@ -280,9 +297,11 @@ const processClosedSessions = async () => {
 };
 
 /**
- * Écarter le gagnant courant et promouvoir le candidat suivant de la liste d'attente.
- * Le candidat suivant passe en état 'en_attente_confirmation' et reçoit un e-mail lui
- * proposant le véhicule.
+ * Écarter le gagnant courant et attribuer directement le véhicule au candidat suivant de la
+ * liste d'attente, qui démarre aussitôt sa propre procédure d'achat (étape 1 : paiement de
+ * la commission, avec le même délai que le tout premier gagnant). Il n'y a plus d'étape de
+ * confirmation intermédiaire : le nouveau gagnant est informé par e-mail que son offre est
+ * retenue suite au retrait du précédent, faute pour celui-ci d'avoir respecté les règles.
  */
 const promoteNextBidder = async (saleId, reason = 'delai_depasse') => {
   const sale = await Sale.findById(saleId);
@@ -292,7 +311,7 @@ const promoteNextBidder = async (saleId, reason = 'delai_depasse') => {
     err.statusCode = 404;
     throw err;
   }
-  if (sale.status !== 'en_cours' && sale.status !== 'en_attente_confirmation') {
+  if (sale.status !== 'en_cours') {
     const err = new Error("Cette vente n'est pas active.");
     err.codeName = 'sale.not_active';
     throw err;
@@ -307,7 +326,7 @@ const promoteNextBidder = async (saleId, reason = 'delai_depasse') => {
 
   let next = null;
   const candidates = sale.waitingList
-    .filter((entry) => entry.rank > sale.currentRank && entry.status !== 'refuse_proposition' && entry.status !== 'ecarte')
+    .filter((entry) => entry.rank > sale.currentRank && entry.status !== 'ecarte')
     .sort((a, b) => a.rank - b.rank);
 
   for (const candidate of candidates) {
@@ -335,17 +354,12 @@ const promoteNextBidder = async (saleId, reason = 'delai_depasse') => {
     return sale;
   }
 
-  const { nextWinnerAcceptanceDeadlineHours } = await generalConfigService.getConfig();
-
-  next.status = 'en_attente_confirmation';
-  sale.status = 'en_attente_confirmation';
+  next.status = 'gagnant';
   sale.currentRank = next.rank;
   sale.winner = next.buyer;
   sale.winningOffer = next.offer;
   sale.amount = next.amount;
-  sale.currentStep = 1;
-  sale.currentStepStartedAt = new Date();
-  sale.currentStepDueAt = new Date(Date.now() + nextWinnerAcceptanceDeadlineHours * 3600 * 1000);
+  const deadlineHours = await startPurchaseProcedure(sale);
   await sale.save();
 
   const [vehicle, session, candidate] = await Promise.all([
@@ -356,7 +370,7 @@ const promoteNextBidder = async (saleId, reason = 'delai_depasse') => {
 
   if (candidate) {
     try {
-      const email = emailTemplates.saleNextBidderOfferEmail({
+      const email = emailTemplates.saleReattributedWinnerEmail({
         user: candidate,
         brand: vehicle?.brand || '',
         model: vehicle?.model || '',
@@ -365,11 +379,11 @@ const promoteNextBidder = async (saleId, reason = 'delai_depasse') => {
         sessionName: session?.name || '',
         saleId: sale._id,
         amount: next.amount,
-        deadlineHours: nextWinnerAcceptanceDeadlineHours || 24,
+        deadlineHours,
       });
       await sendEmail({ to: candidate.email, subject: email.subject, text: email.text, html: email.html });
     } catch (err) {
-      console.error(`Impossible d'envoyer l'e-mail de proposition à ${candidate.email} :`, err.message);
+      console.error(`Impossible d'envoyer l'e-mail de réattribution à ${candidate.email} :`, err.message);
     }
   }
 
@@ -378,14 +392,14 @@ const promoteNextBidder = async (saleId, reason = 'delai_depasse') => {
 
 /**
  * Lorsqu'un acheteur est suspendu (délai dépassé, annulation, suspension admin...),
- * toutes ses autres ventes en cours à l'étape 1 ou 2 (ainsi que les réattributions en attente de confirmation)
- * lui sont retirées et attribuées au candidat suivant.
+ * toutes ses autres ventes en cours à l'étape 1 ou 2 lui sont retirées et attribuées
+ * au candidat suivant.
  */
 const revokeOngoingSalesForSuspendedBuyer = async (buyerId, reason = 'compte_suspendu') => {
   if (!buyerId) return;
   const ongoingSales = await Sale.find({
     winner: buyerId,
-    status: { $in: ['en_cours', 'en_attente_confirmation'] },
+    status: 'en_cours',
     currentStep: { $in: [1, 2] },
   });
 
@@ -396,87 +410,6 @@ const revokeOngoingSalesForSuspendedBuyer = async (buyerId, reason = 'compte_sus
       console.error(`Erreur réattribution de la vente ${sale._id} pour acheteur suspendu:`, err.message);
     }
   }
-};
-
-/**
- * Accepter la proposition de véhicule attribué après désistement du gagnant précédent.
- */
-const acceptPromotion = async (saleId, buyerId) => {
-  const sale = await Sale.findById(saleId);
-  if (!sale) {
-    const err = new Error('Vente introuvable.');
-    err.codeName = 'sale.not_found';
-    err.statusCode = 404;
-    throw err;
-  }
-  if (String(sale.winner) !== String(buyerId)) {
-    const err = new Error('Vous n’êtes pas le candidat désigné pour cette vente.');
-    err.codeName = 'sale.forbidden';
-    err.statusCode = 403;
-    throw err;
-  }
-  if (sale.status !== 'en_attente_confirmation') {
-    const err = new Error('Cette proposition a déjà été traitée ou expirée.');
-    err.codeName = 'sale.invalid_state';
-    err.statusCode = 400;
-    throw err;
-  }
-
-  const current = sale.waitingList.find((entry) => entry.rank === sale.currentRank);
-  if (current) {
-    current.status = 'gagnant';
-  }
-
-  sale.status = 'en_cours';
-  sale.wonAt = new Date();
-  const deadlineHours = await startPurchaseProcedure(sale);
-  await sale.save();
-
-  const [vehicle, session] = await Promise.all([
-    VehicleDossier.findById(sale.vehicle).select('brand model year photos').lean(),
-    Session.findById(sale.session).select('name').lean(),
-  ]);
-  await notifyWinner(sale, vehicle, session || { name: '' }, deadlineHours);
-
-  return sale;
-};
-
-/**
- * Refuser la proposition de véhicule attribué après désistement (sans aucune punition).
- */
-const refusePromotion = async (saleId, buyerId) => {
-  const sale = await Sale.findById(saleId);
-  if (!sale) {
-    const err = new Error('Vente introuvable.');
-    err.codeName = 'sale.not_found';
-    err.statusCode = 404;
-    throw err;
-  }
-  if (String(sale.winner) !== String(buyerId)) {
-    const err = new Error('Vous n’êtes pas le candidat désigné pour cette vente.');
-    err.codeName = 'sale.forbidden';
-    err.statusCode = 403;
-    throw err;
-  }
-  if (sale.status !== 'en_attente_confirmation') {
-    const err = new Error('Cette proposition a déjà été traitée.');
-    err.codeName = 'sale.invalid_state';
-    err.statusCode = 400;
-    throw err;
-  }
-
-  const current = sale.waitingList.find((entry) => entry.rank === sale.currentRank);
-  if (current) {
-    current.status = 'refuse_proposition';
-    current.discardedAt = new Date();
-    current.discardReason = 'proposition_refusee';
-  }
-
-  sale.status = 'en_cours'; // Passer temporairement à en_cours pour que promoteNextBidder puisse traiter le rang suivant
-  await sale.save();
-
-  // On passe immédiatement au candidat suivant dans la liste d'attente (sans punition)
-  return promoteNextBidder(sale._id, 'proposition_refusee');
 };
 
 const serializeSale = (sale) => {
@@ -495,6 +428,7 @@ const serializeSale = (sale) => {
     currentStepDueAt: sale.currentStepDueAt || null,
     commissionPaidAt: sale.commissionPaidAt || null,
     documentsDelivery: sale.documentsDelivery || null,
+    esignature: sale.esignature || null,
     certificate: {
       url: sale.certificate?.url || null,
       generatedAt: sale.certificate?.generatedAt || null,
@@ -505,6 +439,10 @@ const serializeSale = (sale) => {
       validatedAt: sale.certificate?.validatedAt || null,
       lastRejection: (sale.certificate?.rejections || []).at(-1) || null,
       rejectionCount: (sale.certificate?.rejections || []).length,
+    },
+    purchaseDeclaration: {
+      url: sale.purchaseDeclaration?.url || null,
+      generatedAt: sale.purchaseDeclaration?.generatedAt || null,
     },
     // L'acheteur détient le code : c'est lui qui le communique au vendeur à l'enlèvement
     handover: {
@@ -553,7 +491,7 @@ const serializeSale = (sale) => {
  * Ventes remportées par un acheteur, séparées en procédures en cours et ventes clôturées.
  */
 const listBuyerSales = async (buyerId) => {
-  const sales = await Sale.find({ winner: buyerId, status: { $in: ['en_cours', 'cloturee', 'en_attente_confirmation'] } })
+  const sales = await Sale.find({ winner: buyerId, status: { $in: ['en_cours', 'cloturee'] } })
     .populate('vehicle', 'brand model year mileage photos')
     .populate('session', 'name endDate')
     .populate('winningOffer', 'fees')
@@ -562,7 +500,7 @@ const listBuyerSales = async (buyerId) => {
 
   const serialized = sales.map(serializeSale);
   return {
-    ongoing: serialized.filter((sale) => sale.status === 'en_cours' || sale.status === 'en_attente_confirmation'),
+    ongoing: serialized.filter((sale) => sale.status === 'en_cours'),
     closed: serialized.filter((sale) => sale.status === 'cloturee'),
   };
 };
@@ -730,7 +668,6 @@ const settleCommissionPayment = async (sale, { paymentIntentId, amount, currency
     console.error('Erreur enregistrement Payment commission:', err.message);
   }
 
-  await notifySellerCommissionPaid(sale, bankTransferDeadlineHours);
   return sale;
 };
 
@@ -938,7 +875,7 @@ const reconcilePendingCommissionPayments = async () => {
  *   validation_vendeur  le vendeur valide le certificat déposé par l'acheteur
  *   enlevement          le vendeur saisit le code remis par l'acheteur
  */
-const SELLER_ACTION_STEPS = ['virement', 'certificat_vendeur', 'validation_vendeur', 'enlevement'];
+const SELLER_ACTION_STEPS = ['virement_carte_grise', 'tampon_vendeur', 'validation_vendeur', 'enlevement'];
 
 const REMINDER_THRESHOLDS = [50, 80];
 
@@ -965,8 +902,8 @@ const notifyBuyer = async (buyerId, build) => {
  */
 const processStepDeadlines = async () => {
   const now = new Date();
-  const sales = await Sale.find({ 
-    status: { $in: ['en_cours', 'en_attente_confirmation'] }, 
+  const sales = await Sale.find({
+    status: 'en_cours',
     currentStepDueAt: { $ne: null },
     timerPaused: { $ne: true }
   })
@@ -982,19 +919,21 @@ const processStepDeadlines = async () => {
       const dueAt = new Date(sale.currentStepDueAt);
 
       if (now >= dueAt) {
-        if (sale.status === 'en_attente_confirmation') {
-          await promoteNextBidder(sale._id, 'delai_depasse_confirmation');
-          continue;
-        }
-
         const discardedBuyer = sale.winner;
+        // Rang 1 : c'est le tout premier gagnant désigné à la clôture de la session. Un rang
+        // supérieur signifie que ce gagnant a lui-même été promu après le retrait d'un
+        // précédent — dans ce cas précis, ne pas payer la commission à temps ne suspend pas
+        // son compte : on passe simplement au candidat suivant, sans pénalité.
+        const isOriginalWinner = sale.currentRank === 1;
         const buyer = await User.findById(discardedBuyer);
+        let suspended = false;
 
         if (buyer) {
-          const { accountReactivationFee } = await generalConfigService.getConfig();
-          if (stepKey === 'commission') {
-            // Étape 1 : le délai de paiement de la commission est dépassé.
-            // L'acheteur perd la vente, son compte est suspendu et il doit régler la pénalité pour le débloquer.
+          if (stepKey === 'commission' && isOriginalWinner) {
+            // Étape 1 : le délai de paiement de la commission est dépassé pour le tout
+            // premier gagnant. Il perd la vente, son compte est suspendu et il doit régler
+            // la pénalité pour le débloquer.
+            const { accountReactivationFee } = await generalConfigService.getConfig();
             buyer.pendingCommission = {
               amount: accountReactivationFee,
               saleId: sale._id,
@@ -1002,9 +941,11 @@ const processStepDeadlines = async () => {
             buyer.status = 'suspendu';
             await buyer.save();
             await revokeOngoingSalesForSuspendedBuyer(buyer._id, `${stepKey}_delai_depasse`);
-          } else if (stepKey === 'virement') {
+            suspended = true;
+          } else if (stepKey === 'virement_carte_grise') {
             // Étape 2 : le délai de virement (paiement du véhicule) est dépassé.
             // L'acheteur perd la vente et son compte est suspendu.
+            const { accountReactivationFee } = await generalConfigService.getConfig();
             buyer.pendingCommission = {
               amount: accountReactivationFee,
               saleId: sale._id,
@@ -1012,6 +953,7 @@ const processStepDeadlines = async () => {
             buyer.status = 'suspendu';
             await buyer.save();
             await revokeOngoingSalesForSuspendedBuyer(buyer._id, `${stepKey}_delai_depasse`);
+            suspended = true;
           }
         }
 
@@ -1025,11 +967,10 @@ const processStepDeadlines = async () => {
           photoUrl: coverUrl(vehicle),
           sessionName,
           stepKey,
+          suspended,
         }));
         continue;
       }
-
-      if (sale.status === 'en_attente_confirmation') continue;
 
       const startedAt = new Date(sale.currentStepStartedAt || sale.wonAt || dueAt);
       const total = dueAt.getTime() - startedAt.getTime();
@@ -1093,19 +1034,31 @@ const coverUrl = (vehicle) => {
 };
 
 /**
- * Nombre d'offres actives par couple véhicule/session, en une seule agrégation.
- * Le vendeur ne voit que ce décompte pendant la session : les montants restent
- * confidentiels jusqu'à la clôture (appel d'offres à pli fermé).
+ * Nombre d'offres actives et meilleur montant proposé, par couple véhicule/session,
+ * en une seule agrégation. Le vendeur suit ainsi la meilleure enchère en cours face à
+ * son prix de réserve ; l'identité des enchérisseurs, elle, reste couverte par le pli
+ * fermé jusqu'à la clôture.
  */
-const countOffersByListing = async (vehicleIds) => {
+const EMPTY_OFFER_STATS = { count: 0, bestOffer: null };
+
+const offerStatsByListing = async (vehicleIds) => {
   if (vehicleIds.length === 0) return new Map();
 
   const rows = await Offer.aggregate([
     { $match: { vehicle: { $in: vehicleIds }, status: 'active' } },
-    { $group: { _id: { vehicle: '$vehicle', session: '$session' }, count: { $sum: 1 } } },
+    {
+      $group: {
+        _id: { vehicle: '$vehicle', session: '$session' },
+        count: { $sum: 1 },
+        bestOffer: { $max: '$amount' },
+      },
+    },
   ]);
 
-  return new Map(rows.map((row) => [`${row._id.vehicle}:${row._id.session}`, row.count]));
+  return new Map(rows.map((row) => [
+    `${row._id.vehicle}:${row._id.session}`,
+    { count: row.count, bestOffer: row.bestOffer ?? null },
+  ]));
 };
 
 /**
@@ -1162,9 +1115,9 @@ const listSellerVehicles = async (sellerId) => {
   }
 
   const sessionIds = vehicles.map((vehicle) => vehicle.session).filter(Boolean);
-  const [sessions, offerCounts] = await Promise.all([
+  const [sessions, offerStats] = await Promise.all([
     Session.find({ _id: { $in: sessionIds } }).select('name startDate endDate status').lean(),
-    countOffersByListing(vehicles.map((vehicle) => vehicle._id)),
+    offerStatsByListing(vehicles.map((vehicle) => vehicle._id)),
   ]);
   const sessionsById = new Map(sessions.map((session) => [String(session._id), session]));
 
@@ -1190,6 +1143,10 @@ const listSellerVehicles = async (sellerId) => {
     // Motif du dernier renvoi : affiché tel quel au vendeur, il vaut mieux qu'un statut.
     const lastRefusal = (vehicle.refusals || []).slice(-1)[0] || null;
 
+    const stats = vehicle.session
+      ? (offerStats.get(`${vehicle._id}:${vehicle.session}`) || EMPTY_OFFER_STATS)
+      : EMPTY_OFFER_STATS;
+
     return {
       id: String(vehicle._id),
       state,
@@ -1199,9 +1156,10 @@ const listSellerVehicles = async (sellerId) => {
       refusalComment: lastRefusal?.comment || null,
       lotNumber: vehicle.lotNumber ?? null,
       reservePrice: vehicle.reservePrice ?? null,
-      // Nombre d'offres reçues sur la publication courante : le montant reste scellé
-      // jusqu'à la clôture, mais le vendeur peut suivre l'affluence.
-      offerCount: vehicle.session ? (offerCounts.get(`${vehicle._id}:${vehicle.session}`) || 0) : 0,
+      // Affluence et meilleure enchère de la publication courante : le vendeur voit ainsi,
+      // pendant la session, où en est le marché par rapport à son prix de réserve.
+      offerCount: stats.count,
+      bestOffer: stats.bestOffer,
       listingCount: vehicle.listingCount ?? 0,
       updatedAt: vehicle.updatedAt,
       vehicle: {
@@ -1259,22 +1217,25 @@ const listSellerSales = async (sellerId) => {
   }).select('name endDate status').lean();
   const liveSessionsById = new Map(liveSessions.map((session) => [String(session._id), session]));
 
-  const offerCounts = await countOffersByListing([
+  const offerStats = await offerStatsByListing([
     ...sales.map((sale) => sale.vehicle?._id).filter(Boolean),
     ...liveVehicles.map((vehicle) => vehicle._id),
   ]);
-  const offersOn = (vehicleId, sessionId) => offerCounts.get(`${vehicleId}:${sessionId}`) || 0;
+  const statsOn = (vehicleId, sessionId) => offerStats.get(`${vehicleId}:${sessionId}`) || EMPTY_OFFER_STATS;
 
   const inSession = liveVehicles
     .filter((vehicle) => liveSessionsById.has(String(vehicle.session)))
     .map((vehicle) => {
       const session = liveSessionsById.get(String(vehicle.session));
+      const stats = statsOn(vehicle._id, vehicle.session);
       return {
         id: `listing-${vehicle._id}`,
         status: 'en_session',
         amount: null,
         reservePrice: vehicle.reservePrice ?? null,
-        offerCount: offersOn(vehicle._id, vehicle.session),
+        offerCount: stats.count,
+        // Meilleure enchère en cours, à confronter au prix de réserve ci-dessus.
+        bestOffer: stats.bestOffer,
         waitingCount: 0,
         currentStep: null,
         stepKey: null,
@@ -1305,9 +1266,10 @@ const listSellerSales = async (sellerId) => {
       status: sale.status,
       amount: sale.amount,
       reservePrice: sale.reservePrice ?? null,
-      offerCount: vehicle ? offersOn(vehicle._id, sale.session?._id) : 0,
+      offerCount: vehicle ? statsOn(vehicle._id, sale.session?._id).count : 0,
       waitingCount: (sale.waitingList || []).length,
       currentStep: sale.status === 'en_cours' ? sale.currentStep : null,
+      currentStepDueAt: sale.status === 'en_cours' ? (sale.currentStepDueAt || null) : null,
       stepKey: sale.status === 'en_cours' ? (Sale.PURCHASE_STEPS[sale.currentStep - 1] || null) : null,
       stepCount: Sale.PURCHASE_STEPS.length,
       // Vrai quand la vente est bloquée en attente d'une action du vendeur : c'est ce qui
@@ -1454,7 +1416,7 @@ const rejectSignedCertificate = async ({ saleId, sellerId, reason, comment }) =>
     err.codeName = 'sale.not_ongoing';
     throw err;
   }
-  if (sale.currentStep !== 6) {
+  if (sale.currentStep !== 7) {
     const err = new Error("Cette vente n'est pas à l'étape de validation des documents.");
     err.codeName = 'sale.step_mismatch';
     throw err;
@@ -1480,7 +1442,7 @@ const rejectSignedCertificate = async ({ saleId, sellerId, reason, comment }) =>
     signedFilename: null,
     signedAt: null,
   };
-  enterStep(sale, 5, null); // Retour à l'étape 5 pour que l'acheteur redépose
+  enterStep(sale, 6, null); // Retour au tampon acheteur pour un nouveau dépôt
   await sale.save();
 
   await notifyCertificateRejected(sale, { reason, comment });
@@ -1573,8 +1535,8 @@ const prepareHandover = async (sale) => {
     VehicleDossier.findById(sale.vehicle)
       .select('brand model year vin registrationNumber vehicleGenre engine registrationCardAvailable')
       .lean(),
-    User.findById(sale.seller).select('companyName siret address').lean(),
-    User.findById(sale.winner).select('companyName siret address').lean(),
+    User.findById(sale.seller).select('firstName lastName companyName siret address stampUrl').lean(),
+    User.findById(sale.winner).select('firstName lastName companyName siret address stampUrl').lean(),
   ]);
 
   const pdf = await fillPurchaseDeclaration({
@@ -1586,23 +1548,27 @@ const prepareHandover = async (sale) => {
 
   const filename = `ventes/certificats/${sale._id}_declaration-achat.pdf`;
   const stored = await saveBuffer({ buffer: pdf, filename, contentType: 'application/pdf' });
+  const bon = await generateBonEnlevement(sale, vehicle, seller, buyer);
 
   sale.handover = {
     ...(sale.handover?.toObject?.() || sale.handover || {}),
     declarationUrl: stored.url,
     declarationFilename: stored.filename,
     generatedAt: new Date(),
-    otp: generateOtp(),
-    otpAttempts: 0,
     confirmedAt: null,
+  };
+  sale.bonEnlevement = {
+    url: bon.url,
+    filename: bon.filename,
+    generatedAt: new Date(),
   };
 };
 
 /**
- * Étape 5 : le vendeur saisit l'OTP détenu par l'acheteur. Une saisie correcte atteste
+ * Étape 7 : le vendeur atteste
  * la remise du véhicule et clôture la vente.
  */
-const confirmHandover = async ({ saleId, sellerId, otp }) => {
+const confirmHandover = async ({ saleId, sellerId }) => {
   if (!mongoose.isValidObjectId(saleId)) {
     const err = new Error('Vente introuvable.');
     err.codeName = 'sale.not_found';
@@ -1622,34 +1588,9 @@ const confirmHandover = async ({ saleId, sellerId, otp }) => {
     err.codeName = 'sale.not_ongoing';
     throw err;
   }
-  if (sale.currentStep !== 7) {
+  if (sale.currentStep !== 8) {
     const err = new Error("Cette vente n'est pas à l'étape de l'enlèvement.");
     err.codeName = 'sale.step_mismatch';
-    throw err;
-  }
-  if (!sale.handover?.otp) {
-    const err = new Error("Aucun code d'enlèvement n'a été généré pour cette vente.");
-    err.codeName = 'sale.otp_missing';
-    throw err;
-  }
-  if ((sale.handover.otpAttempts || 0) >= MAX_OTP_ATTEMPTS) {
-    const err = new Error("Trop de tentatives incorrectes. Contactez le support pour débloquer l'enlèvement.");
-    err.codeName = 'sale.otp_locked';
-    err.statusCode = 429;
-    throw err;
-  }
-
-  const submitted = String(otp || '').trim();
-  // Comparaison à temps constant : un OTP ne doit pas pouvoir être deviné par mesure du délai
-  const expected = Buffer.from(sale.handover.otp);
-  const given = Buffer.from(submitted.padEnd(expected.length).slice(0, expected.length));
-  const matches = submitted.length === expected.length && crypto.timingSafeEqual(expected, given);
-
-  if (!matches) {
-    sale.handover.otpAttempts = (sale.handover.otpAttempts || 0) + 1;
-    await sale.save();
-    const err = new Error("Code incorrect. Demandez à l'acheteur le code affiché dans son espace.");
-    err.codeName = 'sale.otp_invalid';
     throw err;
   }
 
@@ -1689,7 +1630,7 @@ const validateSignedCertificate = async ({ saleId, sellerId }) => {
     err.codeName = 'sale.not_ongoing';
     throw err;
   }
-  if (sale.currentStep !== 6) {
+  if (sale.currentStep !== 7) {
     const err = new Error("Cette vente n'est pas à l'étape de validation des documents.");
     err.codeName = 'sale.step_mismatch';
     throw err;
@@ -1705,15 +1646,11 @@ const validateSignedCertificate = async ({ saleId, sellerId }) => {
     validatedAt: new Date(),
   };
 
-  // La déclaration d'achat et l'OTP sont préparés en entrant à l'étape d'enlèvement.
-  // Un échec ne doit pas annuler la validation déjà faite par le vendeur.
-  try {
-    await prepareHandover(sale);
-  } catch (error) {
-    console.error(`Préparation de l'enlèvement impossible (vente ${sale._id}) : ${error.message}`);
-  }
+  // Le bon d'enlèvement doit exister avant d'ouvrir l'étape 8. En cas d'échec,
+  // la vente reste à l'étape 7 afin que l'opération puisse être relancée proprement.
+  await prepareHandover(sale);
 
-  enterStep(sale, 7, null);
+  enterStep(sale, 8, null);
   await sale.save();
 
   await notifyBuyerHandoverReady(sale);
@@ -1762,6 +1699,7 @@ const getSellerSale = async (saleId, sellerId) => {
     commissionPaidAt: sale.commissionPaidAt || null,
     documentsDelivery: sale.documentsDelivery || null,
     transferConfirmedAt: sale.transferConfirmedAt || null,
+    esignature: sale.esignature || null,
     certificate: {
       url: sale.certificate?.url || null,
       generatedAt: sale.certificate?.generatedAt || null,
@@ -1770,6 +1708,10 @@ const getSellerSale = async (saleId, sellerId) => {
       validatedAt: sale.certificate?.validatedAt || null,
       lastRejection: (sale.certificate?.rejections || []).at(-1) || null,
       rejectionCount: (sale.certificate?.rejections || []).length,
+    },
+    purchaseDeclaration: {
+      url: sale.purchaseDeclaration?.url || null,
+      generatedAt: sale.purchaseDeclaration?.generatedAt || null,
     },
     // L'OTP n'est jamais transmis au vendeur : il doit le tenir de l'acheteur.
     // La déclaration ne lui est ouverte qu'une fois la remise confirmée.
@@ -1809,22 +1751,22 @@ const getSellerSale = async (saleId, sellerId) => {
 
 /**
  * Générer le certificat de cession pré-rempli et l'attacher à la vente.
- * Le document reste stocké tel quel : c'est l'exemplaire que l'acheteur devra
- * télécharger, signer, tamponner puis redéposer.
+ * Les cachets déjà enregistrés par le vendeur et l'acheteur sont apposés pendant
+ * la génération. Les signatures restent gérées par le parcours de signature.
  */
 const generateCertificate = async (sale) => {
   const [vehicle, seller, buyer] = await Promise.all([
     VehicleDossier.findById(sale.vehicle)
       .select('brand model year mileage vin registrationNumber firstRegistrationDate vehicleGenre engine registrationCardAvailable formulaNumber registrationCardMissingMotif')
       .lean(),
-    User.findById(sale.seller).select('companyName siret address stampUrl').lean(),
-    User.findById(sale.winner).select('companyName siret address stampUrl').lean(),
+    User.findById(sale.seller).select('firstName lastName email companyName siret address stampUrl language').lean(),
+    User.findById(sale.winner).select('firstName lastName email companyName siret address stampUrl language').lean(),
   ]);
 
   const pdf = await fillCertificateOfTransfer({
     vehicle,
-    seller: { ...seller, stampUrl: null }, // Do not include seller stamp in the original pre-filled cert
-    buyer: { ...buyer, stampUrl: null }, // Do not include buyer stamp in the original pre-filled cert
+    seller,
+    buyer,
     transferredAt: sale.transferConfirmedAt || new Date(),
   });
 
@@ -1838,7 +1780,24 @@ const generateCertificate = async (sale) => {
     generatedAt: new Date(),
   };
 
-  return { vehicle, buyer, seller };
+  return { vehicle, buyer, seller, buffer: pdf };
+};
+
+/**
+ * Prévenir l'utilisateur (vendeur ou acheteur) que le document est prêt à être signé via OpenAPI
+ */
+const notifySignatureReady = async (user, signatureUrl, vehicle) => {
+  try {
+    const email = emailTemplates.signatureReadyEmail({
+      user,
+      brand: vehicle?.brand || '',
+      model: vehicle?.model || '',
+      signatureUrl,
+    });
+    await sendEmail({ to: user.email, subject: email.subject, text: email.text, html: email.html });
+  } catch (error) {
+    console.error(`Notification de signature OpenAPI impossible pour ${user.email} : ${error.message}`);
+  }
 };
 
 /**
@@ -1906,6 +1865,28 @@ const confirmTransferReceived = async ({ saleId, sellerId }) => {
     await sale.save();
   }
   return sale;
+};
+
+
+const generatePurchaseDeclarationDoc = async (sale, vehicle, seller, buyer) => {
+  const pdf = await fillPurchaseDeclaration({
+    vehicle,
+    seller,
+    buyer,
+    purchasedAt: sale.transferConfirmedAt || new Date(),
+  });
+
+  const filename = `ventes/declarations/${sale._id}_declaration-achat.pdf`;
+  const stored = await saveBuffer({ buffer: pdf, filename, contentType: 'application/pdf' });
+
+  sale.purchaseDeclaration = {
+    ...(sale.purchaseDeclaration?.toObject?.() || sale.purchaseDeclaration || {}),
+    url: stored.url,
+    filename: stored.filename,
+    generatedAt: new Date(),
+  };
+
+  return { buffer: pdf, ...stored };
 };
 
 const processRegistrationCard = async ({ saleId, sellerId, formulaNumber, registrationCardMissingMotif }) => {
@@ -1978,55 +1959,64 @@ const processRegistrationCard = async ({ saleId, sellerId, formulaNumber, regist
   await VehicleDossier.updateOne({ _id: sale.vehicle }, registrationCardUpdate);
 
   // Le certificat est produit à cet instant précis : il porte la date de cession attestée.
-  // La vente n'avance que lorsque la génération des documents a réellement abouti.
-  let generated = null;
+  let generatedCert = null;
+  let generatedDecl = null;
   try {
-    generated = await generateCertificate(sale);
+    generatedCert = await generateCertificate(sale);
+    generatedDecl = await generatePurchaseDeclarationDoc(sale, generatedCert.vehicle, generatedCert.seller, generatedCert.buyer);
   } catch (error) {
-    console.error(`Génération du certificat impossible (vente ${sale._id}) : ${error.message}`);
+    console.error(`Génération des documents impossible (vente ${sale._id}) : ${error.message}`);
   }
-  if (!generated) {
+
+  if (!generatedCert || !generatedDecl) {
     const err = new Error('La génération des documents a échoué. Vous pouvez relancer le traitement.');
     err.codeName = 'sale.certificate_generation_failed';
     err.statusCode = 500;
     throw err;
   }
 
-  // Si le vendeur a configuré son tampon automatique, on produit le document tamponné par le vendeur.
-  // On passe directement à l'étape de validation par l'acheteur (étape 4).
-  if (generated && generated.seller?.stampUrl) {
-    let sellerSignedUrl = null;
-    let sellerSignedFilename = null;
-    try {
-      const signedPdf = await fillCertificateOfTransfer({
-        vehicle: generated.vehicle,
-        seller: generated.seller, // Contains seller's stampUrl
-        buyer: { ...generated.buyer, stampUrl: null }, // No buyer stamp yet
-        transferredAt: sale.transferConfirmedAt || new Date(),
-      });
-      const filename = `ventes/certificats/${sale._id}_certificat-cession_seller-signed.pdf`;
-      const stored = await saveBuffer({ buffer: signedPdf, filename, contentType: 'application/pdf' });
-      sellerSignedUrl = stored.url;
-      sellerSignedFilename = stored.filename;
-    } catch (error) {
-      console.error(`Génération auto du certificat vendeur impossible (vente ${sale._id}) : ${error.message}`);
-    }
+  // Création de la session de signature sur OpenAPI
+  try {
+    const signatureSession = await createSignatureSession({
+      saleId: sale._id.toString(),
+      seller: generatedCert.seller,
+      buyer: generatedCert.buyer,
+      certificateBuffer: generatedCert.buffer,
+      purchaseDeclarationBuffer: generatedDecl.buffer
+    });
 
-    sale.certificate = {
-      ...(sale.certificate?.toObject?.() || sale.certificate || {}),
-      sellerSignedUrl: sellerSignedUrl || sale.certificate.url,
-      sellerSignedFilename: sellerSignedFilename || sale.certificate.filename,
-      sellerSignedAt: new Date(),
+    // Trouver les URLs de signature pour chaque signataire
+    const sellerSigner = signatureSession.signers?.find(s => s.email === generatedCert.seller.email);
+    const buyerSigner = signatureSession.signers?.find(s => s.email === generatedCert.buyer.email);
+
+    sale.esignature = {
+      operationId: signatureSession.id,
+      status: signatureSession.state || 'WAIT_VALIDATION',
+      sellerUrl: sellerSigner ? sellerSigner.url : null,
+      buyerUrl: buyerSigner ? buyerSigner.url : null,
+      initiatedAt: new Date(),
+      sellerStampIncluded: Boolean(generatedCert.seller.stampUrl),
+      buyerStampIncluded: Boolean(generatedCert.buyer.stampUrl),
     };
-    enterStep(sale, 4, null); // validation_acheteur
-    await sale.save();
-    await notifyBuyerCertificateReady(sale, generated.vehicle);
-  } else {
-    // Le vendeur n'a pas de tampon. Il doit télécharger et uploader le certificat en premier (Étape 3).
-    // Aucun délai strict imposé ici.
+
+    // On passe à l'étape 3 (attente de signature)
     enterStep(sale, 3, null);
     await sale.save();
-    // Le vendeur est déjà connecté (il vient de valider le virement), pas besoin de l'alerter par e-mail
+
+    // Notifier le vendeur et l'acheteur
+    if (sellerSigner && sellerSigner.url) {
+      await notifySignatureReady(generatedCert.seller, sellerSigner.url, generatedCert.vehicle);
+    }
+    if (buyerSigner && buyerSigner.url) {
+      await notifySignatureReady(generatedCert.buyer, buyerSigner.url, generatedCert.vehicle);
+    }
+
+  } catch (error) {
+    console.error(`Création de la session de signature échouée (vente ${sale._id}) : ${error.message}`);
+    const err = new Error('L\'intégration avec le service de signature a échoué.');
+    err.codeName = 'sale.esignature_failed';
+    err.statusCode = 500;
+    throw err;
   }
 
   return sale;
@@ -2061,7 +2051,7 @@ const submitSellerCertificate = async ({ saleId, sellerId, url, filename }) => {
     err.codeName = 'sale.not_ongoing';
     throw err;
   }
-  if (sale.currentStep !== 3) {
+  if (sale.currentStep !== 4) {
     const err = new Error("Cette vente n'est pas en attente du certificat vendeur.");
     err.codeName = 'sale.step_mismatch';
     throw err;
@@ -2074,8 +2064,8 @@ const submitSellerCertificate = async ({ saleId, sellerId, url, filename }) => {
     sale.certificate.lastRejection = null;
   }
 
-  // Le document déposé par le vendeur passe obligatoirement par la validation de l'acheteur (étape 4).
-  enterStep(sale, 4, null);
+  // Le dossier tamponné par le vendeur passe obligatoirement par la validation de l'acheteur.
+  enterStep(sale, 5, null);
   await sale.save();
   
   // On notifie l'acheteur que le vendeur a déposé son certificat
@@ -2106,7 +2096,7 @@ const validateSellerCertificate = async ({ saleId, buyerId }) => {
   if (sale.status !== 'en_cours') {
     const err = new Error("Cette vente n'est plus en cours."); err.codeName = 'sale.not_ongoing'; throw err;
   }
-  if (sale.currentStep !== 4) {
+  if (sale.currentStep !== 5) {
     const err = new Error("Cette vente n'est pas à l'étape de validation du certificat vendeur."); err.codeName = 'sale.step_mismatch'; throw err;
   }
 
@@ -2116,36 +2106,19 @@ const validateSellerCertificate = async ({ saleId, buyerId }) => {
     ...(sale.certificate?.lastRejection?.rejectedBy === 'buyer' ? { lastRejection: null } : {}),
   };
 
-  const [buyer, seller] = await Promise.all([
-    User.findById(buyerId).select('companyName siret address stampUrl').lean(),
-    User.findById(sale.seller).select('companyName siret address stampUrl').lean(),
-  ]);
-
-  if (buyer?.stampUrl && seller?.stampUrl) {
-    const vehicle = await VehicleDossier.findById(sale.vehicle)
-      .select('brand model year mileage vin registrationNumber firstRegistrationDate vehicleGenre engine registrationCardAvailable')
-      .lean();
-
-    const pdf = await fillCertificateOfTransfer({
-      vehicle,
-      seller,
-      buyer,
-      transferredAt: sale.transferConfirmedAt || new Date(),
-    });
-
-    const filename = `ventes/certificats/${sale._id}_certificat-cession-final.pdf`;
-    const stored = await saveBuffer({ buffer: pdf, filename, contentType: 'application/pdf' });
-
-    sale.certificate.signedUrl = stored.url;
-    sale.certificate.signedFilename = stored.filename;
+  if (sale.esignature?.buyerStampIncluded) {
+    // Le tampon acheteur était déjà présent dans le dossier envoyé à la signature.
+    // On conserve donc le PDF signé intact afin de ne pas invalider sa signature PAdES.
+    sale.certificate.signedUrl = sale.certificate.sellerSignedUrl || sale.esignature?.signedDocumentUrl;
+    sale.certificate.signedFilename = sale.esignature?.signedDocumentFilename || null;
     sale.certificate.signedAt = new Date();
     
-    enterStep(sale, 6, null);
+    enterStep(sale, 7, null);
     await sale.save();
     
     await notifySellerSignedCertificate(sale);
   } else {
-    enterStep(sale, 5, null);
+    enterStep(sale, 6, null);
     await sale.save();
   }
 
@@ -2169,19 +2142,12 @@ const rejectSellerCertificate = async ({ saleId, buyerId, reason, comment }) => 
   if (sale.status !== 'en_cours') {
     const err = new Error("Cette vente n'est plus en cours."); err.codeName = 'sale.not_ongoing'; throw err;
   }
-  if (sale.currentStep !== 4) {
+  if (sale.currentStep !== 5) {
     const err = new Error("Cette vente n'est pas à l'étape de validation du certificat vendeur."); err.codeName = 'sale.step_mismatch'; throw err;
   }
 
   const current = sale.certificate.toObject?.() || sale.certificate;
   const rejectionEntry = { url: current.sellerSignedUrl, rejectedBy: 'buyer', reason, comment: comment || '', createdAt: new Date() };
-
-  // Régénérer un certificat vierge propre sans tampon
-  try {
-    await generateCertificate(sale);
-  } catch (error) {
-    console.error(`Régénération du certificat vierge impossible (vente ${sale._id}) : ${error.message}`);
-  }
 
   // Mettre à jour l'historique et réinitialiser les signatures vendeur
   sale.certificate.rejections = [
@@ -2195,7 +2161,7 @@ const rejectSellerCertificate = async ({ saleId, buyerId, reason, comment }) => 
   sale.certificate.sellerSignedAt = null;
   sale.certificate.buyerValidatedAt = null;
 
-  enterStep(sale, 3, null); // Retour à l'étape 3
+  enterStep(sale, 4, null); // Retour au tampon vendeur
   await sale.save();
 
   // On notifie le vendeur
@@ -2229,7 +2195,7 @@ const submitSignedCertificate = async ({ saleId, buyerId, url, filename }) => {
     err.codeName = 'sale.not_ongoing';
     throw err;
   }
-  if (sale.currentStep !== 5) {
+  if (sale.currentStep !== 6) {
     const err = new Error("Cette vente n'est pas à l'étape du certificat de cession.");
     err.codeName = 'sale.step_mismatch';
     throw err;
@@ -2243,7 +2209,7 @@ const submitSignedCertificate = async ({ saleId, buyerId, url, filename }) => {
     ...(sale.certificate?.lastRejection?.rejectedBy === 'seller' ? { lastRejection: null } : {}),
   };
   // Le vendeur doit maintenant vérifier les documents déposés
-  enterStep(sale, 6, null);
+  enterStep(sale, 7, null);
   await sale.save();
 
   await notifySellerSignedCertificate(sale);
@@ -2431,6 +2397,83 @@ const forceEndSale = async (saleId, suspendBuyer, suspendSeller, promoteNext) =>
   return Sale.findById(saleId);
 };
 
+/**
+ * Récupère le document signé depuis OpenAPI et fait avancer la vente à l'étape 7
+ */
+const finalizeSignature = async (saleId, signatureId) => {
+  const sale = await Sale.findById(saleId);
+  if (!sale) {
+    throw new Error('Vente introuvable.');
+  }
+
+  // Vérifier qu'on est bien à l'étape où on attend la signature
+  if (sale.currentStep !== 3) {
+    console.warn(`La vente ${saleId} n'est pas à l'étape 3. Ignoré.`);
+    return sale;
+  }
+  if (!sale.esignature?.operationId || String(sale.esignature.operationId) !== String(signatureId)) {
+    const error = new Error('La signature reçue ne correspond pas à cette vente.');
+    error.codeName = 'sale.esignature_mismatch';
+    error.statusCode = 403;
+    throw error;
+  }
+
+  try {
+    // 1. Récupérer le document signé d'OpenAPI (Buffer)
+    const signedPdfBuffer = await fetchSignedDocument(signatureId);
+
+    // 2. Sauvegarder dans notre espace de stockage
+    const filename = `ventes/documents/${saleId}/documents_signes_${Date.now()}.pdf`;
+    const stored = await saveBuffer({
+      buffer: signedPdfBuffer,
+      filename,
+      contentType: 'application/pdf',
+    });
+    const finalUrl = stored.url;
+
+    let auditStored = null;
+    try {
+      const auditBuffer = await fetchAuditTrail(signatureId);
+      auditStored = await saveBuffer({
+        buffer: auditBuffer,
+        filename: `ventes/documents/${saleId}/audit-signature.pdf`,
+        contentType: 'application/pdf',
+      });
+    } catch (auditError) {
+      console.error(`Archivage de la piste d'audit impossible (vente ${saleId}) : ${auditError.message}`);
+    }
+
+    // 3. Mettre à jour l'objet Sale
+    sale.esignature = {
+      ...(sale.esignature?.toObject?.() || sale.esignature || {}),
+      status: 'DONE',
+      signedDocumentUrl: finalUrl,
+      signedDocumentFilename: stored.filename,
+      auditUrl: auditStored?.url || null,
+      auditFilename: auditStored?.filename || null,
+      completedAt: new Date(),
+    };
+
+    // Le PDF signé reste intact. Si le vendeur avait déjà enregistré son tampon, celui-ci
+    // faisait partie du document envoyé à OpenAPI et l'étape 4 est automatiquement satisfaite.
+    if (sale.esignature?.sellerStampIncluded) {
+      sale.certificate.sellerSignedUrl = finalUrl;
+      sale.certificate.sellerSignedFilename = stored.filename;
+      sale.certificate.sellerSignedAt = new Date();
+      enterStep(sale, 5, null);
+    } else {
+      enterStep(sale, 4, null);
+    }
+    await sale.save();
+
+    console.log(`Signature finalisée pour la vente ${saleId}. Passage à l'étape ${sale.currentStep}.`);
+    return sale;
+  } catch (error) {
+    console.error(`Erreur lors de la finalisation de la signature (vente ${saleId}) :`, error.message);
+    throw error;
+  }
+};
+
 module.exports = {
   validateSellerCertificate,
   rejectSellerCertificate,
@@ -2461,7 +2504,6 @@ module.exports = {
   toggleSaleTimer,
   forceEndSale,
   extendCurrentStepDeadline,
-  acceptPromotion,
-  refusePromotion,
   revokeOngoingSalesForSuspendedBuyer,
+  finalizeSignature,
 };

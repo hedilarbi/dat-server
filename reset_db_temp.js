@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 
 const Sale = require('./models/sale.model');
 const Offer = require('./models/offer.model');
+const User = require('./models/user.model');
 const VehicleDossier = require('./models/vehicleDossier.model');
 const Session = require('./models/session.model');
 const SessionConfig = require('./models/sessionConfig.model');
@@ -34,6 +35,21 @@ mongoose.connect(process.env.MONGODB_URI)
     // 4. Delete all sessions
     const sessionsResult = await Session.deleteMany({});
     console.log(`Deleted ${sessionsResult.deletedCount} sessions.`);
+
+    // 5. Reset the user state left over by the sale flow : un acheteur suspendu pour
+    //    un délai dépassé ou une annulation retrouve un compte 'valide' et perd la
+    //    commission impayée qui le bloquait.
+    const reactivatedResult = await User.updateMany(
+      { status: { $in: ['suspendu', 'bloque'] } },
+      { $set: { status: 'valide' } },
+    );
+    console.log(`Reactivated ${reactivatedResult.modifiedCount} suspended/blocked users.`);
+
+    const commissionResult = await User.updateMany(
+      { pendingCommission: { $exists: true } },
+      { $unset: { pendingCommission: '' } },
+    );
+    console.log(`Cleared ${commissionResult.modifiedCount} pending commissions.`);
 
     // Prevent the running background job from recreating sessions immediately.
     await SessionConfig.updateMany({}, { $set: { autoGenerateWeeks: 0 } });
