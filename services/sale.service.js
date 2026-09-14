@@ -9,7 +9,6 @@ const emailTemplates = require('./emailTemplates.service');
 const generalConfigService = require('./generalConfig.service');
 const paymentService = require('./payment.service');
 const notificationService = require('./notification.service');
-const crypto = require('crypto');
 const { fillCertificateOfTransfer } = require('./certificateOfTransfer.service');
 const { fillPurchaseDeclaration } = require('./purchaseDeclaration.service');
 const { saveBuffer } = require('./storage.service');
@@ -1530,9 +1529,6 @@ const notifySaleClosed = async (sale) => {
   }
 };
 
-/** Code à 6 chiffres tiré d'une source cryptographique. */
-const generateOtp = () => String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
-
 /** Préparer l'étape 8 en générant uniquement le bon d'enlèvement. */
 const prepareHandover = async (sale) => {
   const [vehicle, seller, buyer] = await Promise.all([
@@ -1642,10 +1638,16 @@ const validateSignedCertificate = async ({ saleId, sellerId }) => {
   // la vente reste à l'étape 7 afin que l'opération puisse être relancée proprement.
   await prepareHandover(sale);
 
+  const closedAt = new Date();
   enterStep(sale, 8, null);
+  sale.status = 'cloturee';
+  sale.closedAt = closedAt;
+  sale.handover.confirmedAt = closedAt;
+  sale.currentStepDueAt = null;
+  sale.stepRemindersSent = [];
   await sale.save();
 
-  await notifyBuyerHandoverReady(sale);
+  await notifySaleClosed(sale);
 
   return sale;
 };
