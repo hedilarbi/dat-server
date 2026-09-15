@@ -2,7 +2,44 @@ const SUPPORTED_LANGUAGES = ['fr', 'en'];
 const CLIENT_BASE_URL = process.env.CLIENT_BASE_URL || 'https://dealautopro.com';
 
 const normalizeLanguage = (language) => {
-  return SUPPORTED_LANGUAGES.includes(language) ? language : 'fr';
+  const normalizedLanguage = String(language || '')
+    .trim()
+    .toLowerCase()
+    .split(/[-_]/)[0];
+
+  return SUPPORTED_LANGUAGES.includes(normalizedLanguage) ? normalizedLanguage : 'fr';
+};
+
+const ROLE_LOGIN_PATHS = {
+  fr: {
+    acheteur: '/fr/connexion/acheteur',
+    vendeur: '/fr/connexion/vendeur'
+  },
+  en: {
+    acheteur: '/en/login/buyer',
+    vendeur: '/en/login/seller'
+  }
+};
+
+const CORRECTION_PATHS = {
+  fr: {
+    acheteur: '/fr/acheteur/tableau-de-bord/profil#correction-form',
+    vendeur: '/fr/vendeur/tableau-de-bord#correction-form'
+  },
+  en: {
+    acheteur: '/en/buyer/dashboard/profile#correction-form',
+    vendeur: '/en/seller/dashboard#correction-form'
+  }
+};
+
+const getUserRole = (role) => role === 'vendeur' ? 'vendeur' : 'acheteur';
+
+const getRoleLoginUrl = (user, nextPath) => {
+  const lang = normalizeLanguage(user.language);
+  const role = getUserRole(user.role);
+  const loginUrl = `${CLIENT_BASE_URL}${ROLE_LOGIN_PATHS[lang][role]}`;
+
+  return nextPath ? `${loginUrl}?next=${encodeURIComponent(nextPath)}` : loginUrl;
 };
 
 const layout = ({ heading, body, footer }) => `
@@ -106,6 +143,7 @@ const passwordResetEmail = ({ language, firstName, lastName, otpCode }) => {
 
 const approvalEmail = (user) => {
   const lang = normalizeLanguage(user.language);
+  const loginUrl = getRoleLoginUrl(user);
   const copy = {
     fr: {
       subject: 'Votre compte a été validé ! - DealAutoPro',
@@ -114,7 +152,7 @@ const approvalEmail = (user) => {
       line1: 'Nous avons le plaisir de vous informer que vos documents professionnels ont été vérifiés et votre compte a été validé.',
       line2: 'Vous pouvez dès à présent vous connecter sur votre espace pour commencer à utiliser nos services.',
       cta: 'Se connecter',
-      text: 'Félicitations, votre compte professionnel a été validé par notre équipe. Vous pouvez maintenant accéder à la plateforme.',
+      text: `Félicitations, votre compte professionnel a été validé par notre équipe. Vous pouvez maintenant accéder à la plateforme : ${loginUrl}`,
       footer: "L'équipe DealAutoPro"
     },
     en: {
@@ -124,7 +162,7 @@ const approvalEmail = (user) => {
       line1: 'We are pleased to inform you that your business documents have been reviewed and your account has been approved.',
       line2: 'You can now sign in to your workspace and start using the platform.',
       cta: 'Sign in',
-      text: 'Congratulations, your business account has been approved by our team. You can now access the platform.',
+      text: `Congratulations, your business account has been approved by our team. You can now access the platform: ${loginUrl}`,
       footer: 'The DealAutoPro team'
     }
   }[lang];
@@ -140,7 +178,7 @@ const approvalEmail = (user) => {
         <p style="color: #5A5E66; font-size: 14px;">${copy.line1}</p>
         <p style="color: #5A5E66; font-size: 14px;">${copy.line2}</p>
         <div style="text-align: center; margin: 30px 0;">
-          <a href="https://dealautopro.com/login" style="background-color: #13243C; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold;">${copy.cta}</a>
+          <a href="${loginUrl}" style="background-color: #13243C; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold;">${copy.cta}</a>
         </div>
       `
     })
@@ -149,6 +187,7 @@ const approvalEmail = (user) => {
 
 const rejectionEmail = ({ user, reasonsText, reasonsPlain, comment }) => {
   const lang = normalizeLanguage(user.language);
+  const loginUrl = getRoleLoginUrl(user);
   const copy = {
     fr: {
       subject: 'Action requise : Inscription refusée - DealAutoPro',
@@ -159,7 +198,7 @@ const rejectionEmail = ({ user, reasonsText, reasonsPlain, comment }) => {
       comment: "Commentaire de l'administrateur :",
       line2: 'Pour corriger ces éléments, veuillez vous connecter sur votre espace et mettre à jour votre dossier.',
       cta: 'Accéder à mon espace',
-      text: `Votre inscription a été refusée pour les raisons suivantes : ${reasonsPlain}. Commentaire : ${comment || ''}. Veuillez corriger votre dossier sur votre espace.`,
+      text: `Votre inscription a été refusée pour les raisons suivantes : ${reasonsPlain}. Commentaire : ${comment || ''}. Veuillez corriger votre dossier sur votre espace : ${loginUrl}`,
       footer: "L'équipe DealAutoPro"
     },
     en: {
@@ -171,7 +210,7 @@ const rejectionEmail = ({ user, reasonsText, reasonsPlain, comment }) => {
       comment: 'Administrator comment:',
       line2: 'To correct these items, please sign in to your workspace and update your file.',
       cta: 'Open my workspace',
-      text: `Your registration was rejected for the following reasons: ${reasonsPlain}. Comment: ${comment || ''}. Please update your file in your workspace.`,
+      text: `Your registration was rejected for the following reasons: ${reasonsPlain}. Comment: ${comment || ''}. Please update your file in your workspace: ${loginUrl}`,
       footer: 'The DealAutoPro team'
     }
   }[lang];
@@ -192,7 +231,7 @@ const rejectionEmail = ({ user, reasonsText, reasonsPlain, comment }) => {
         </div>
         <p style="color: #5A5E66; font-size: 14px;">${copy.line2}</p>
         <div style="text-align: center; margin: 30px 0;">
-          <a href="https://dealautopro.com/login" style="background-color: #13243C; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold;">${copy.cta}</a>
+          <a href="${loginUrl}" style="background-color: #13243C; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold;">${copy.cta}</a>
         </div>
       `
     })
@@ -201,8 +240,8 @@ const rejectionEmail = ({ user, reasonsText, reasonsPlain, comment }) => {
 
 const correctionEmail = ({ user, reasonsText, reasonsPlain, comment }) => {
   const lang = normalizeLanguage(user.language);
-  const correctionPath = user.role === 'vendeur' ? '/vendeur/tableau-de-bord' : '/profil';
-  const correctionUrl = `${CLIENT_BASE_URL}${correctionPath}#correction-form`;
+  const role = getUserRole(user.role);
+  const correctionUrl = getRoleLoginUrl(user, CORRECTION_PATHS[lang][role]);
   const copy = {
     fr: {
       subject: 'Action requise : Correction de votre dossier - DealAutoPro',
@@ -821,6 +860,68 @@ const saleAwardedSellerEmail = ({ user, brand, model, year, photoUrl, sessionNam
 };
 
 /**
+ * Informer le vendeur qu'un gagnant n'a pas pu être confirmé et que la vente vient d'être
+ * confiée au candidat suivant. Le nouveau prix est affiché comme dans l'e-mail d'attribution
+ * initial, mais l'identité de l'acheteur reste masquée jusqu'au paiement de sa commission.
+ */
+const saleReattributedSellerEmail = ({ user, brand, model, year, photoUrl, sessionName, amount, saleId, rank }) => {
+  const lang = normalizeLanguage(user.language);
+  const locale = lang === 'fr' ? 'fr-FR' : 'en-GB';
+  const url = `${CLIENT_BASE_URL}${SELLER_SALES_PATH[lang]}/${saleId}`;
+  const vehicleLabel = [brand, model].filter(Boolean).join(' ') || (lang === 'fr' ? 'Véhicule' : 'Vehicle');
+  const price = Number(amount).toLocaleString(locale);
+
+  const copy = lang === 'fr' ? {
+    subject: `Nouvel offrant pour votre ${vehicleLabel} - DealAutoPro`,
+    heading: 'La vente passe au candidat suivant',
+    hello: `Bonjour ${user.firstName} ${user.lastName},`,
+    subtitle: [year ? `Année ${year}` : null, sessionName].filter(Boolean).join(' · '),
+    line1: `L'acheteur précédent n'a pas pu être confirmé. La vente de votre ${vehicleLabel} passe donc au ${rank === 2 ? '2ᵉ' : `${rank}ᵉ`} meilleur offrant.`,
+    offerLabel: 'Nouvelle offre retenue',
+    line2: 'Ce nouvel acheteur est actuellement en cours de confirmation.',
+    line3: 'Vous serez notifié dès qu’il sera validé et que la procédure pourra continuer.',
+    cta: 'Suivre la vente',
+    text: `L'acheteur précédent n'a pas pu être confirmé. La vente de votre ${vehicleLabel} passe au ${rank === 2 ? '2ᵉ' : `${rank}ᵉ`} meilleur offrant, avec une nouvelle offre de ${price} €. Cet acheteur est en cours de confirmation. Vous serez notifié dès qu'il sera validé : ${url}`,
+    footer: "L'équipe DealAutoPro"
+  } : {
+    subject: `A new bidder for your ${vehicleLabel} - DealAutoPro`,
+    heading: 'The sale is moving to the next bidder',
+    hello: `Hello ${user.firstName} ${user.lastName},`,
+    subtitle: [year ? `Year ${year}` : null, sessionName].filter(Boolean).join(' · '),
+    line1: `The previous buyer could not be confirmed. The sale of your ${vehicleLabel} has therefore moved to the bidder ranked number ${rank}.`,
+    offerLabel: 'New selected bid',
+    line2: 'This new buyer is currently being confirmed.',
+    line3: 'You will be notified as soon as the buyer is confirmed and the process can continue.',
+    cta: 'Track the sale',
+    text: `The previous buyer could not be confirmed. The sale of your ${vehicleLabel} has moved to bidder number ${rank}, with a new bid of €${price}. This buyer is currently being confirmed. You will be notified as soon as the buyer is confirmed: ${url}`,
+    footer: 'The DealAutoPro team'
+  };
+
+  return {
+    subject: copy.subject,
+    text: copy.text,
+    html: layout({
+      heading: copy.heading,
+      footer: copy.footer,
+      body: `
+        <p style="color: #1A2230; font-size: 16px;">${copy.hello}</p>
+        ${vehicleCard(photoUrl, vehicleLabel, copy.subtitle)}
+        <p style="color: #5A5E66; font-size: 14px;">${copy.line1}</p>
+        <div style="background-color: #FFFFFF; border: 1px solid #DCD7CB; border-radius: 8px; padding: 16px; text-align: center; margin: 18px 0;">
+          <div style="color: #5A5E66; font-size: 11px; text-transform: uppercase; letter-spacing: 1px;">${copy.offerLabel}</div>
+          <div style="color: #13243C; font-size: 26px; font-weight: bold; margin-top: 6px;">${lang === 'fr' ? `${price} €` : `€${price}`}</div>
+        </div>
+        <p style="color: #B3893F; font-size: 14px; font-weight: bold;">${copy.line2}</p>
+        <p style="color: #5A5E66; font-size: 14px;">${copy.line3}</p>
+        <div style="text-align: center; margin: 30px 0;">
+          <a href="${url}" style="background-color: #13243C; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold;">${copy.cta}</a>
+        </div>
+      `
+    })
+  };
+};
+
+/**
  * Prévenir l'acheteur que le certificat de cession est prêt : il doit le télécharger,
  * le signer et le tamponner, puis le redéposer sur la plateforme.
  */
@@ -1253,44 +1354,41 @@ const BIDS_PATH = { fr: '/fr/acheteur/tableau-de-bord/mes-offres', en: '/en/buye
 /**
  * Envoyé à la clôture d'une session aux enchérisseurs classés juste derrière le gagnant.
  * Leur offre n'est pas perdue : elle reste mobilisable si le gagnant sort de la procédure.
- * Le montant du gagnant n'est jamais divulgué — seul leur propre rang leur est communiqué.
+ * Le montant du gagnant et leur rang exact ne sont jamais divulgués : ils savent uniquement
+ * que leur offre fait partie des trois meilleures.
  */
-const saleWaitingListEmail = ({ user, brand, model, year, photoUrl, sessionName, rank, amount }) => {
+const saleWaitingListEmail = ({ user, brand, model, year, photoUrl, sessionName, amount }) => {
   const lang = normalizeLanguage(user.language);
   const locale = lang === 'fr' ? 'fr-FR' : 'en-GB';
   const url = `${CLIENT_BASE_URL}${BIDS_PATH[lang]}`;
   const vehicleLabel = [brand, model].filter(Boolean).join(' ') || (lang === 'fr' ? 'Véhicule' : 'Vehicle');
   const price = amount != null ? Number(amount).toLocaleString(locale) : null;
-  const position = lang === 'fr'
-    ? (rank === 2 ? '2e' : `${rank}e`)
-    : (rank === 2 ? '2nd' : rank === 3 ? '3rd' : `${rank}th`);
-
   const copy = {
     fr: {
-      subject: `Vous êtes en liste d'attente pour ${vehicleLabel} - DealAutoPro`,
-      heading: 'Vous êtes en liste d\'attente',
+      subject: `Votre offre fait partie des trois meilleures pour ${vehicleLabel} - DealAutoPro`,
+      heading: 'Votre offre fait partie des trois meilleures',
       hello: `Bonjour ${user.firstName} ${user.lastName},`,
       subtitle: [year ? `Année ${year}` : null, sessionName].filter(Boolean).join(' · '),
-      line1: `À la clôture de ${sessionName}, votre offre sur ${vehicleLabel} figure parmi les trois meilleures : vous êtes ${position} offrant.`,
+      line1: `À la clôture de ${sessionName}, votre offre sur ${vehicleLabel} fait partie des trois meilleures offres reçues.`,
       line2: price ? `Montant de votre offre : ${price} €.` : null,
       line3: `Le véhicule a été attribué au meilleur offrant. Si celui-ci ne respecte pas les règles de la plateforme ou laisse expirer ses délais, le véhicule sera proposé au candidat suivant de la liste d'attente. Vous recevrez alors un e-mail vous invitant à accepter ou décliner, sans aucune pénalité.`,
       line4: 'Aucune action de votre part n\'est nécessaire pour le moment.',
       cta: 'Voir mes offres',
-      text: `À la clôture de ${sessionName}, votre offre sur ${vehicleLabel}${price ? ` (${price} €)` : ''} figure parmi les trois meilleures : vous êtes ${position} offrant et vous êtes placé en liste d'attente. `
+      text: `À la clôture de ${sessionName}, votre offre sur ${vehicleLabel}${price ? ` (${price} €)` : ''} fait partie des trois meilleures offres reçues et reste en attente. `
         + `Si le meilleur offrant ne respecte pas les règles de la plateforme, le véhicule vous sera proposé par e-mail. Aucune action n'est nécessaire pour le moment : ${url}`,
       footer: "L'équipe DealAutoPro"
     },
     en: {
-      subject: `You are on the waiting list for ${vehicleLabel} - DealAutoPro`,
-      heading: 'You are on the waiting list',
+      subject: `Your bid is among the top three for ${vehicleLabel} - DealAutoPro`,
+      heading: 'Your bid is among the top three',
       hello: `Hello ${user.firstName} ${user.lastName},`,
       subtitle: [year ? `Year ${year}` : null, sessionName].filter(Boolean).join(' · '),
-      line1: `At the close of ${sessionName}, your bid on ${vehicleLabel} ranks among the top three: you are the ${position} highest bidder.`,
+      line1: `At the close of ${sessionName}, your bid on ${vehicleLabel} is among the three highest bids received.`,
       line2: price ? `Your bid amount: €${price}.` : null,
       line3: `The vehicle has been awarded to the highest bidder. Should they fail to comply with the platform rules or let their deadlines expire, the vehicle will be offered to the next candidate on the waiting list. You will then receive an email inviting you to accept or decline, with no penalty.`,
       line4: 'No action is required from you at this stage.',
       cta: 'View my bids',
-      text: `At the close of ${sessionName}, your bid on ${vehicleLabel}${price ? ` (€${price})` : ''} ranks among the top three: you are the ${position} highest bidder and have been placed on the waiting list. `
+      text: `At the close of ${sessionName}, your bid on ${vehicleLabel}${price ? ` (€${price})` : ''} is among the three highest bids received and remains on the waiting list. `
         + `If the highest bidder fails to comply with the platform rules, the vehicle will be offered to you by email. No action is required for now: ${url}`,
       footer: 'The DealAutoPro team'
     }
@@ -1335,6 +1433,7 @@ module.exports = {
   saleReattributedWinnerEmail,
   saleWaitingListEmail,
   saleAwardedSellerEmail,
+  saleReattributedSellerEmail,
   saleUnsoldSellerEmail,
   saleCertificateReadyEmail,
   saleSignedCertificateSellerEmail,

@@ -175,6 +175,7 @@ const serializeOffer = (offer) => {
       id: String(vehicle._id),
       brand: vehicle.brand || '',
       model: vehicle.model || '',
+      registrationNumber: vehicle.registrationNumber || null,
       photoUrl: coverPhoto ? (coverPhoto.processedUrl || coverPhoto.originalUrl) : null,
     } : null,
     session: session ? {
@@ -192,7 +193,7 @@ const serializeOffer = (offer) => {
  */
 const listBuyerOffers = async (buyerId) => {
   const offers = await Offer.find({ buyer: buyerId })
-    .populate('vehicle', 'brand model photos')
+    .populate('vehicle', 'brand model registrationNumber photos')
     .populate('session', 'name endDate status')
     .sort({ createdAt: -1 })
     .lean();

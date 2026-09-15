@@ -194,6 +194,11 @@ const enterStep = (sale, step, deadlineHours) => {
 const startPurchaseProcedure = async (sale) => {
   const { commissionPaymentDeadlineHours } = await generalConfigService.getConfig();
   sale.wonAt = new Date();
+  // Une réattribution doit toujours démarrer avec un chronomètre actif. Sans cette remise
+  // à zéro, une pause décidée pour le gagnant précédent exclut aussi le nouveau gagnant de
+  // processStepDeadlines : il ne reçoit alors ni le rappel à 50 %, ni celui à 80 %.
+  sale.timerPaused = false;
+  sale.timerPausedAt = null;
   return enterStep(sale, 1, commissionPaymentDeadlineHours);
 };
 
@@ -359,13 +364,31 @@ const promoteNextBidder = async (saleId, reason = 'delai_depasse') => {
   sale.winner = next.buyer;
   sale.winningOffer = next.offer;
   sale.amount = next.amount;
+
+  // Les traces de paiement appartiennent au gagnant écarté. Les conserver empêcherait le
+  // nouveau gagnant de payer et pourrait permettre à une ancienne session Stripe encore en
+  // attente d'être réconciliée sur cette nouvelle attribution.
+  sale.commissionPaidAt = null;
+  sale.documentsDelivery = null;
+  sale.transferConfirmedAt = null;
+  sale.commissionPayment = {
+    provider: 'stripe',
+    mode: null,
+    checkoutSessionId: null,
+    paymentIntentId: null,
+    status: null,
+    amount: null,
+    currency: 'eur',
+    initiatedAt: null,
+  };
   const deadlineHours = await startPurchaseProcedure(sale);
   await sale.save();
 
-  const [vehicle, session, candidate] = await Promise.all([
+  const [vehicle, session, candidate, seller] = await Promise.all([
     VehicleDossier.findById(sale.vehicle).select('brand model year photos').lean(),
     Session.findById(sale.session).select('name').lean(),
     User.findById(next.buyer).select('email firstName lastName language').lean(),
+    User.findById(sale.seller).select('email firstName lastName language').lean(),
   ]);
 
   if (candidate) {
@@ -384,6 +407,25 @@ const promoteNextBidder = async (saleId, reason = 'delai_depasse') => {
       await sendEmail({ to: candidate.email, subject: email.subject, text: email.text, html: email.html });
     } catch (err) {
       console.error(`Impossible d'envoyer l'e-mail de réattribution à ${candidate.email} :`, err.message);
+    }
+  }
+
+  if (seller) {
+    try {
+      const email = emailTemplates.saleReattributedSellerEmail({
+        user: seller,
+        brand: vehicle?.brand || '',
+        model: vehicle?.model || '',
+        year: vehicle?.year || null,
+        photoUrl: coverUrl(vehicle),
+        sessionName: session?.name || '',
+        saleId: sale._id,
+        amount: next.amount,
+        rank: next.rank,
+      });
+      await sendEmail({ to: seller.email, subject: email.subject, text: email.text, html: email.html });
+    } catch (err) {
+      console.error(`Impossible d'envoyer l'e-mail de réattribution au vendeur ${seller.email} :`, err.message);
     }
   }
 
@@ -496,7 +538,7 @@ const serializeSale = (sale) => {
  */
 const listBuyerSales = async (buyerId) => {
   const sales = await Sale.find({ winner: buyerId, status: { $in: ['en_cours', 'cloturee'] } })
-    .populate('vehicle', 'brand model year mileage photos')
+    .populate('vehicle', 'brand model year mileage registrationNumber photos')
     .populate('session', 'name endDate')
     .populate('winningOffer', 'fees')
     .sort({ wonAt: -1, createdAt: -1 })
@@ -1170,6 +1212,7 @@ const listSellerVehicles = async (sellerId) => {
         id: String(vehicle._id),
         brand: vehicle.brand || '',
         model: vehicle.model || '',
+        registrationNumber: vehicle.registrationNumber || null,
         photoUrl: coverUrl(vehicle),
       },
       session: session ? {
@@ -1642,7 +1685,6 @@ const validateSignedCertificate = async ({ saleId, sellerId }) => {
   enterStep(sale, 8, null);
   sale.status = 'cloturee';
   sale.closedAt = closedAt;
-  sale.handover.confirmedAt = closedAt;
   sale.currentStepDueAt = null;
   sale.stepRemindersSent = [];
   await sale.save();
