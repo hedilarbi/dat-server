@@ -20,6 +20,17 @@ const { isStripeConfigured } = require('../config/stripe');
 const CLOSED_SESSION_STATUSES = ['closed', 'cloturee'];
 const OPEN_SESSION_STATUSES = ['open', 'active'];
 
+const getOfferCommissionTotal = (offer) => {
+  const fees = offer?.fees;
+  const amount = Number(fees?.total ?? (Number(fees?.commission || 0) + Number(fees?.taxAmount || 0)));
+  if (!Number.isFinite(amount) || amount <= 0) {
+    const err = new Error('Le montant de la commission impayée est introuvable.');
+    err.codeName = 'payment.fees_missing';
+    throw err;
+  }
+  return amount;
+};
+
 
 /**
  * Moment retenu pour départager deux offres de même montant : une offre modifiée est
@@ -1036,11 +1047,11 @@ const processStepDeadlines = async () => {
           if (stepKey === 'commission' && isOriginalWinner) {
             // Étape 1 : le délai de paiement de la commission est dépassé pour le tout
             // premier gagnant. Il perd la vente, son compte est suspendu et il doit régler
-            // la pénalité pour le débloquer.
-            const { accountReactivationFee } = await generalConfigService.getConfig();
+            // la commission qu'il n'a pas payée pour débloquer son compte.
             buyer.pendingCommission = {
-              amount: accountReactivationFee,
+              amount: getOfferCommissionTotal(sale.winningOffer),
               saleId: sale._id,
+              reason: 'commission_impayee',
             };
             buyer.status = 'suspendu';
             await buyer.save();
@@ -1053,6 +1064,7 @@ const processStepDeadlines = async () => {
             buyer.pendingCommission = {
               amount: accountReactivationFee,
               saleId: sale._id,
+              reason: 'penalite_etape_2',
             };
             buyer.status = 'suspendu';
             await buyer.save();
@@ -2333,7 +2345,7 @@ const submitSignedCertificate = async ({ saleId, buyerId, url, filename }) => {
 /**
  * Annulation de l'achat par l'acheteur à l'étape 1.
  * La vente est annulée (et potentiellement réattribuée), et l'acheteur
- * se voit attribuer une dette de commission, suspendant immédiatement son compte.
+ * se voit attribuer la commission qu'il devait régler, suspendant immédiatement son compte.
  */
 const cancelSaleByBuyer = async ({ saleId, buyerId }) => {
   if (!mongoose.isValidObjectId(saleId)) {
@@ -2364,13 +2376,10 @@ const cancelSaleByBuyer = async ({ saleId, buyerId }) => {
     throw err;
   }
 
-  // Pénalité fixe d'annulation
-  const { accountReactivationFee } = await generalConfigService.getConfig();
-  let commissionAmount = accountReactivationFee;
-
   buyer.pendingCommission = {
-    amount: commissionAmount,
+    amount: getOfferCommissionTotal(sale.winningOffer),
     saleId: sale._id,
+    reason: 'commission_impayee',
   };
   buyer.status = 'suspendu';
   await buyer.save();

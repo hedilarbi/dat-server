@@ -141,7 +141,7 @@ const retrieveCommissionPaymentIntent = async (paymentIntentId) => {
   };
 };
 
-const createPendingCommissionCheckout = async ({ amount, user, language }) => {
+const createPendingCommissionCheckout = async ({ amount, reason, user, language }) => {
   const lang = ['fr', 'en'].includes(language) ? language : 'fr';
   const returnUrl = `${CLIENT_BASE_URL}/${lang}/${user.role}/tableau-de-bord/profil?session_id={CHECKOUT_SESSION_ID}&action=pending_commission`;
 
@@ -156,27 +156,32 @@ const createPendingCommissionCheckout = async ({ amount, user, language }) => {
         currency: 'eur',
         unit_amount: toMinorUnits(amount),
         product_data: {
-          name: lang === 'fr' ? 'Commission d\'annulation DealAutoPro' : 'DealAutoPro Cancellation Commission',
+          name: reason === 'penalite_etape_2'
+            ? (lang === 'fr' ? 'Pénalité de réactivation DealAutoPro' : 'DealAutoPro reactivation penalty')
+            : (lang === 'fr' ? 'Commission DealAutoPro impayée' : 'Unpaid DealAutoPro commission'),
         },
       },
     }],
     metadata: {
       userId: String(user._id),
       purpose: 'pending_commission',
+      debtReason: reason || 'commission_impayee',
     },
   });
 
   return { session, amount: toMinorUnits(amount) };
 };
 
-const createPendingCommissionPaymentIntent = async ({ amount, user }) => {
+const createPendingCommissionPaymentIntent = async ({ amount, reason, user }) => {
   const intent = await getStripe().paymentIntents.create({
     amount: toMinorUnits(amount),
     currency: 'eur',
     receipt_email: user.email,
+    description: reason === 'penalite_etape_2' ? 'Pénalité de réactivation DealAutoPro' : 'Commission DealAutoPro impayée',
     metadata: {
       userId: String(user._id),
       purpose: 'pending_commission',
+      debtReason: reason || 'commission_impayee',
     },
   });
 

@@ -6,6 +6,9 @@ const { createAdminRegistrationNotification } = require('./notification.service'
 const { normalizeLanguage, otpEmail, passwordResetEmail } = require('./emailTemplates.service');
 const paymentService = require('./payment.service');
 const { isStripeConfigured } = require('../config/stripe');
+const Sale = require('../models/sale.model');
+const Offer = require('../models/offer.model');
+const generalConfigService = require('./generalConfig.service');
 
 // SIRET : 14 chiffres (SIREN sur 9 + NIC sur 5)
 const SIRET_REGEX = /^\d{14}$/;
@@ -26,6 +29,37 @@ const generateToken = (userId) => {
   return jwt.sign({ id: userId }, jwtSecret, {
     expiresIn: '30d', // Valide pendant 30 jours
   });
+};
+
+/**
+ * Répare les dettes créées avant la distinction entre l'étape 1 et l'étape 2.
+ * La liste d'attente conserve l'offre du candidat et le motif exact de son retrait.
+ */
+const normalizePendingCommission = async (user) => {
+  if (!user?.pendingCommission?.saleId || !user.pendingCommission?.amount) return user;
+
+  const sale = await Sale.findById(user.pendingCommission.saleId).select('waitingList').lean();
+  const entry = sale?.waitingList?.find((candidate) => String(candidate.buyer) === String(user._id));
+  if (!entry?.discardReason) return user;
+
+  let reason;
+  let amount;
+  if (entry.discardReason.startsWith('virement_carte_grise')) {
+    reason = 'penalite_etape_2';
+    ({ accountReactivationFee: amount } = await generalConfigService.getConfig());
+  } else if (entry.discardReason.startsWith('commission') || entry.discardReason === 'annulation_volontaire') {
+    const offer = await Offer.findById(entry.offer).select('fees').lean();
+    reason = 'commission_impayee';
+    amount = Number(offer?.fees?.total ?? (Number(offer?.fees?.commission || 0) + Number(offer?.fees?.taxAmount || 0)));
+  }
+
+  if (!reason || !Number.isFinite(Number(amount)) || Number(amount) <= 0) return user;
+  if (user.pendingCommission.reason !== reason || Number(user.pendingCommission.amount) !== Number(amount)) {
+    user.pendingCommission.reason = reason;
+    user.pendingCommission.amount = Number(amount);
+    await user.save();
+  }
+  return user;
 };
 
 /**
@@ -209,6 +243,8 @@ const registerStep2 = async (userId, profileData) => {
     err.codeName = 'auth.email_not_verified';
     throw err;
   }
+
+  await normalizePendingCommission(user);
 
   if (user.status === 'refuse') {
     const err = new Error('Votre inscription a été définitivement refusée. Veuillez contacter le support.');
@@ -510,10 +546,12 @@ const startPendingCommissionPayment = async (userId) => {
   if (!user || !user.pendingCommission?.amount) {
     throw new Error('Aucune commission en attente.');
   }
+  await normalizePendingCommission(user);
   if (!isStripeConfigured()) throw new Error('Paiement indisponible (Stripe non configuré).');
 
   const { session, amount } = await paymentService.createPendingCommissionCheckout({
     amount: user.pendingCommission.amount,
+    reason: user.pendingCommission.reason,
     user,
     language: user.language
   });
@@ -526,10 +564,12 @@ const startPendingCommissionIntent = async (userId) => {
   if (!user || !user.pendingCommission?.amount) {
     throw new Error('Aucune commission en attente.');
   }
+  await normalizePendingCommission(user);
   if (!isStripeConfigured()) throw new Error('Paiement indisponible (Stripe non configuré).');
 
   return paymentService.createPendingCommissionPaymentIntent({
     amount: user.pendingCommission.amount,
+    reason: user.pendingCommission.reason,
     user
   });
 };
@@ -557,6 +597,7 @@ const confirmPendingCommissionPayment = async (userId, checkoutSessionId) => {
       user: user._id,
       sale: user.pendingCommission?.saleId || null,
       type: 'reactivation_compte',
+      debtReason: user.pendingCommission.reason || 'commission_impayee',
       amount: user.pendingCommission.amount,
       currency: 'eur',
       stripeSessionId: checkoutSessionId || null,
@@ -589,6 +630,7 @@ module.exports = {
   resetPassword,
   updateLanguage,
   updateStamp,
+  normalizePendingCommission,
   startPendingCommissionPayment,
   startPendingCommissionIntent,
   confirmPendingCommissionPayment,

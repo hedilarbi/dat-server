@@ -122,10 +122,16 @@ const userSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
-  // Commission impayée (suite annulation)
+  // Dette à régler avant réactivation : commission réellement due à l'étape 1,
+  // ou pénalité fixe configurée lorsque le délai de l'étape 2 est dépassé.
   pendingCommission: {
     amount: { type: Number },
-    saleId: { type: mongoose.Schema.Types.ObjectId, ref: 'Sale' }
+    saleId: { type: mongoose.Schema.Types.ObjectId, ref: 'Sale' },
+    reason: {
+      type: String,
+      enum: ['commission_impayee', 'penalite_etape_2'],
+      default: 'commission_impayee'
+    }
   }
 }, {
   timestamps: true

@@ -24,7 +24,7 @@ const generalConfigSchema = new mongoose.Schema({
     default: 3,
     min: 1,
   },
-  // Frais de dossier pour réactiver un compte suspendu (en euros).
+  // Pénalité de réactivation réservée au dépassement du délai de virement (étape 2).
   accountReactivationFee: {
     type: Number,
     default: 300,

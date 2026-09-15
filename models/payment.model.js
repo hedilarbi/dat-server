@@ -22,6 +22,11 @@ const paymentSchema = new mongoose.Schema({
     enum: ['paiement_commission', 'reactivation_compte'],
     required: true,
   },
+  debtReason: {
+    type: String,
+    enum: ['commission_impayee', 'penalite_etape_2'],
+    default: null,
+  },
   amount: {
     type: Number, // Montant en Euros (ex: 300)
     required: true,

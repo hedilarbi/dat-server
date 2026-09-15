@@ -235,6 +235,7 @@ const logout = async (req, res, next) => {
  */
 const getMe = async (req, res, next) => {
   try {
+    await authService.normalizePendingCommission(req.user);
     res.status(200).json({
       success: true,
       user: req.user

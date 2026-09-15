@@ -541,7 +541,10 @@ const listPayments = async (filters = {}) => {
       saleId: p.sale ? String(p.sale._id) : null,
       vehicle: p.sale?.vehicle ? `${p.sale.vehicle.brand} ${p.sale.vehicle.model}` : null,
       type: p.type,
-      typeLabel: p.type === 'paiement_commission' ? 'Paiement de commission' : 'Réactivation de compte',
+      debtReason: p.debtReason || null,
+      typeLabel: p.type === 'paiement_commission'
+        ? 'Paiement de commission'
+        : p.debtReason === 'penalite_etape_2' ? 'Pénalité étape 2' : 'Commission impayée — réactivation',
       amount: p.amount,
       currency: p.currency || 'eur',
       provider: p.provider || 'stripe',
