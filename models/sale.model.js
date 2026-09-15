@@ -41,7 +41,10 @@ const waitingListEntrySchema = new mongoose.Schema({
     default: 'en_attente'
   },
   discardedAt: { type: Date },
-  discardReason: { type: String, trim: true }
+  discardReason: { type: String, trim: true },
+  topThreeEmailSentAt: { type: Date, default: null },
+  promotionEmailSentAt: { type: Date, default: null },
+  sellerPromotionEmailSentAt: { type: Date, default: null }
 }, { _id: false });
 
 /**

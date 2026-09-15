@@ -859,6 +859,55 @@ const saleAwardedSellerEmail = ({ user, brand, model, year, photoUrl, sessionNam
   };
 };
 
+/** Informer le vendeur que la commission est encaissée et que l'acheteur passe au virement. */
+const saleBuyerConfirmedSellerEmail = ({ user, brand, model, year, photoUrl, sessionName, saleId }) => {
+  const lang = normalizeLanguage(user.language);
+  const url = `${CLIENT_BASE_URL}${SELLER_SALES_PATH[lang]}/${saleId}`;
+  const vehicleLabel = [brand, model].filter(Boolean).join(' ') || (lang === 'fr' ? 'Véhicule' : 'Vehicle');
+  const copy = lang === 'fr' ? {
+    subject: `Acheteur confirmé pour votre ${vehicleLabel} - DealAutoPro`,
+    heading: 'L’acheteur a été confirmé',
+    hello: `Bonjour ${user.firstName} ${user.lastName},`,
+    subtitle: [year ? `Année ${year}` : null, sessionName].filter(Boolean).join(' · '),
+    line1: `L’acheteur de votre ${vehicleLabel} a réglé sa commission et vient d’être confirmé.`,
+    line2: 'Il est maintenant en train d’effectuer le virement du prix du véhicule sur votre compte.',
+    line3: 'Veuillez confirmer la réception du virement dès que vous le recevez afin de faire avancer le processus de vente.',
+    cta: 'Ouvrir la vente',
+    text: `L’acheteur de votre ${vehicleLabel} a été confirmé et effectue maintenant son virement. Veuillez confirmer sa réception dès que les fonds arrivent afin de faire avancer la vente : ${url}`,
+    footer: "L'équipe DealAutoPro"
+  } : {
+    subject: `Buyer confirmed for your ${vehicleLabel} - DealAutoPro`,
+    heading: 'The buyer has been confirmed',
+    hello: `Hello ${user.firstName} ${user.lastName},`,
+    subtitle: [year ? `Year ${year}` : null, sessionName].filter(Boolean).join(' · '),
+    line1: `The buyer of your ${vehicleLabel} has paid the platform commission and has now been confirmed.`,
+    line2: 'They are now transferring the vehicle price to your bank account.',
+    line3: 'Please confirm receipt as soon as the funds arrive so the sale process can continue.',
+    cta: 'Open the sale',
+    text: `The buyer of your ${vehicleLabel} has been confirmed and is now making the bank transfer. Please confirm receipt as soon as the funds arrive so the sale can continue: ${url}`,
+    footer: 'The DealAutoPro team'
+  };
+
+  return {
+    subject: copy.subject,
+    text: copy.text,
+    html: layout({
+      heading: copy.heading,
+      footer: copy.footer,
+      body: `
+        <p style="color: #1A2230; font-size: 16px;">${copy.hello}</p>
+        ${vehicleCard(photoUrl, vehicleLabel, copy.subtitle)}
+        <p style="color: #2F6F4F; font-size: 15px; font-weight: bold;">${copy.line1}</p>
+        <p style="color: #5A5E66; font-size: 14px;">${copy.line2}</p>
+        <p style="color: #13243C; font-size: 14px; font-weight: bold;">${copy.line3}</p>
+        <div style="text-align: center; margin: 30px 0;">
+          <a href="${url}" style="background-color: #13243C; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold;">${copy.cta}</a>
+        </div>
+      `
+    })
+  };
+};
+
 /**
  * Informer le vendeur qu'un gagnant n'a pas pu être confirmé et que la vente vient d'être
  * confiée au candidat suivant. Le nouveau prix est affiché comme dans l'e-mail d'attribution
@@ -1433,6 +1482,7 @@ module.exports = {
   saleReattributedWinnerEmail,
   saleWaitingListEmail,
   saleAwardedSellerEmail,
+  saleBuyerConfirmedSellerEmail,
   saleReattributedSellerEmail,
   saleUnsoldSellerEmail,
   saleCertificateReadyEmail,

@@ -48,6 +48,7 @@ const LAYOUT = {
     registrationCardNo: { x: 291, y: 554 },
     registrationCardDate: { x: 145, y: 535 },
     formulaNumber: { x: 322, y: 535 },
+    registrationCardMissingMotif: { x: 142, y: 512 },
   },
   // Bloc bas : certificat de vente, rempli par l'ancien propriétaire (le vendeur)
   seller: {
@@ -157,10 +158,21 @@ const fillPurchaseDeclaration = async ({ vehicle, seller, buyer, purchasedAt }) 
   write(LAYOUT.vehicle.type, vehicle?.engine);
   write(LAYOUT.vehicle.commercialName, vehicle?.model);
   write(LAYOUT.vehicle.genre, vehicle?.vehicleGenre);
-  if (vehicle?.registrationCardAvailable) {
+  // --- Certificat d'immatriculation
+  // Même règle que sur le certificat de cession : une valeur inconnue ne doit cocher
+  // aucune case. Si la carte grise existe, le numéro de formule collecté à l'étape 2 est
+  // inscrit dans la zone du nouveau format ; sinon, le motif d'absence est écrit sur la
+  // ligne prévue par le Cerfa.
+  if (vehicle?.registrationCardAvailable === true) {
     check(LAYOUT.vehicle.registrationCardYes);
-  } else {
+    if (vehicle.formulaNumber) {
+      write(LAYOUT.vehicle.formulaNumber, vehicle.formulaNumber);
+    }
+  } else if (vehicle?.registrationCardAvailable === false) {
     check(LAYOUT.vehicle.registrationCardNo);
+    if (vehicle.registrationCardMissingMotif) {
+      write(LAYOUT.vehicle.registrationCardMissingMotif, vehicle.registrationCardMissingMotif, 8);
+    }
   }
 
   // --- Certificat de vente (ancien propriétaire)

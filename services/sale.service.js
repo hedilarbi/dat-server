@@ -86,7 +86,7 @@ const WAITING_LIST_NOTIFIED_RANKS = 3;
  */
 const notifyWaitingList = async (sale, vehicle, session) => {
   const runnersUp = (sale.waitingList || []).filter(
-    (entry) => entry.rank > 1 && entry.rank <= WAITING_LIST_NOTIFIED_RANKS,
+    (entry) => entry.rank > 1 && entry.rank <= WAITING_LIST_NOTIFIED_RANKS && !entry.topThreeEmailSentAt,
   );
   if (runnersUp.length === 0) return;
 
@@ -112,8 +112,50 @@ const notifyWaitingList = async (sale, vehicle, session) => {
       });
 
       await sendEmail({ to: buyer.email, subject: email.subject, text: email.text, html: email.html });
+      entry.topThreeEmailSentAt = new Date();
+      await sale.save();
     } catch (error) {
       console.error(`Notification de liste d'attente impossible (vente ${sale._id}, rang ${entry.rank}) : ${error.message}`);
+    }
+  }
+};
+
+/** Envoyer (ou reprendre) les notifications liées à une réattribution déjà enregistrée. */
+const notifyReattributedParties = async (sale, entry, vehicle, session, deadlineHours) => {
+  const [candidate, seller] = await Promise.all([
+    User.findById(entry.buyer).select('email firstName lastName language').lean(),
+    User.findById(sale.seller).select('email firstName lastName language').lean(),
+  ]);
+
+  if (candidate && !entry.promotionEmailSentAt) {
+    try {
+      const email = emailTemplates.saleReattributedWinnerEmail({
+        user: candidate,
+        brand: vehicle?.brand || '', model: vehicle?.model || '', year: vehicle?.year || null,
+        photoUrl: coverUrl(vehicle), sessionName: session?.name || '', saleId: sale._id,
+        amount: entry.amount, deadlineHours,
+      });
+      await sendEmail({ to: candidate.email, subject: email.subject, text: email.text, html: email.html });
+      entry.promotionEmailSentAt = new Date();
+      await sale.save();
+    } catch (err) {
+      console.error(`Impossible d'envoyer l'e-mail de réattribution à ${candidate.email} :`, err.message);
+    }
+  }
+
+  if (seller && !entry.sellerPromotionEmailSentAt) {
+    try {
+      const email = emailTemplates.saleReattributedSellerEmail({
+        user: seller,
+        brand: vehicle?.brand || '', model: vehicle?.model || '', year: vehicle?.year || null,
+        photoUrl: coverUrl(vehicle), sessionName: session?.name || '', saleId: sale._id,
+        amount: entry.amount, rank: entry.rank,
+      });
+      await sendEmail({ to: seller.email, subject: email.subject, text: email.text, html: email.html });
+      entry.sellerPromotionEmailSentAt = new Date();
+      await sale.save();
+    } catch (err) {
+      console.error(`Impossible d'envoyer l'e-mail de réattribution au vendeur ${seller.email} :`, err.message);
     }
   }
 };
@@ -302,6 +344,34 @@ const processClosedSessions = async () => {
 };
 
 /**
+ * Reprendre les e-mails d'attribution qui n'ont pas été acceptés par le SMTP lors du premier
+ * passage. Cette routine est rejouable : chaque destinataire est horodaté après succès.
+ */
+const processPendingAttributionEmails = async () => {
+  const sales = await Sale.find({ status: 'en_cours' })
+    .populate('vehicle', 'brand model year photos')
+    .populate('session', 'name');
+
+  for (const sale of sales) {
+    try {
+      await notifyWaitingList(sale, sale.vehicle, sale.session || { name: '' });
+
+      if (sale.currentRank > 1) {
+        const current = sale.waitingList.find((entry) => entry.rank === sale.currentRank);
+        if (current && (!current.promotionEmailSentAt || !current.sellerPromotionEmailSentAt)) {
+          const startedAt = sale.currentStepStartedAt ? new Date(sale.currentStepStartedAt).getTime() : null;
+          const dueAt = sale.currentStepDueAt ? new Date(sale.currentStepDueAt).getTime() : null;
+          const deadlineHours = startedAt && dueAt ? Math.max(1, Math.round((dueAt - startedAt) / 3_600_000)) : 0;
+          await notifyReattributedParties(sale, current, sale.vehicle, sale.session, deadlineHours);
+        }
+      }
+    } catch (error) {
+      console.error(`Reprise des e-mails d'attribution impossible (vente ${sale._id}) : ${error.message}`);
+    }
+  }
+};
+
+/**
  * Écarter le gagnant courant et attribuer directement le véhicule au candidat suivant de la
  * liste d'attente, qui démarre aussitôt sa propre procédure d'achat (étape 1 : paiement de
  * la commission, avec le même délai que le tout premier gagnant). Il n'y a plus d'étape de
@@ -384,50 +454,11 @@ const promoteNextBidder = async (saleId, reason = 'delai_depasse') => {
   const deadlineHours = await startPurchaseProcedure(sale);
   await sale.save();
 
-  const [vehicle, session, candidate, seller] = await Promise.all([
+  const [vehicle, session] = await Promise.all([
     VehicleDossier.findById(sale.vehicle).select('brand model year photos').lean(),
     Session.findById(sale.session).select('name').lean(),
-    User.findById(next.buyer).select('email firstName lastName language').lean(),
-    User.findById(sale.seller).select('email firstName lastName language').lean(),
   ]);
-
-  if (candidate) {
-    try {
-      const email = emailTemplates.saleReattributedWinnerEmail({
-        user: candidate,
-        brand: vehicle?.brand || '',
-        model: vehicle?.model || '',
-        year: vehicle?.year || null,
-        photoUrl: coverUrl(vehicle),
-        sessionName: session?.name || '',
-        saleId: sale._id,
-        amount: next.amount,
-        deadlineHours,
-      });
-      await sendEmail({ to: candidate.email, subject: email.subject, text: email.text, html: email.html });
-    } catch (err) {
-      console.error(`Impossible d'envoyer l'e-mail de réattribution à ${candidate.email} :`, err.message);
-    }
-  }
-
-  if (seller) {
-    try {
-      const email = emailTemplates.saleReattributedSellerEmail({
-        user: seller,
-        brand: vehicle?.brand || '',
-        model: vehicle?.model || '',
-        year: vehicle?.year || null,
-        photoUrl: coverUrl(vehicle),
-        sessionName: session?.name || '',
-        saleId: sale._id,
-        amount: next.amount,
-        rank: next.rank,
-      });
-      await sendEmail({ to: seller.email, subject: email.subject, text: email.text, html: email.html });
-    } catch (err) {
-      console.error(`Impossible d'envoyer l'e-mail de réattribution au vendeur ${seller.email} :`, err.message);
-    }
-  }
+  await notifyReattributedParties(sale, next, vehicle, session, deadlineHours);
 
   return sale;
 };
@@ -712,6 +743,33 @@ const settleCommissionPayment = async (sale, { paymentIntentId, amount, currency
     });
   } catch (err) {
     console.error('Erreur enregistrement Payment commission:', err.message);
+  }
+
+  // La commission encaissée confirme l'acheteur : le vendeur peut maintenant surveiller
+  // son compte bancaire et valider le virement depuis la page de cette vente.
+  try {
+    const [saleContext, seller] = await Promise.all([
+      Sale.findById(sale._id)
+        .populate('vehicle', 'brand model year photos')
+        .populate('session', 'name')
+        .lean(),
+      User.findById(sale.seller).select('email firstName lastName language').lean(),
+    ]);
+    if (seller) {
+      const vehicle = saleContext?.vehicle;
+      const email = emailTemplates.saleBuyerConfirmedSellerEmail({
+        user: seller,
+        brand: vehicle?.brand || '',
+        model: vehicle?.model || '',
+        year: vehicle?.year || null,
+        photoUrl: coverUrl(vehicle),
+        sessionName: saleContext?.session?.name || '',
+        saleId: String(sale._id),
+      });
+      await sendEmail({ to: seller.email, subject: email.subject, text: email.text, html: email.html });
+    }
+  } catch (err) {
+    console.error(`Impossible d'envoyer la confirmation de l'acheteur au vendeur (vente ${sale._id}) :`, err.message);
   }
 
   return sale;
@@ -1144,7 +1202,7 @@ const listSellerVehicles = async (sellerId) => {
     // Tous les dossiers, pas seulement les validés : la phase 1 vit précisément dans les
     // statuts amont (soumis, correction demandée, refusé).
     VehicleDossier.find({ seller: sellerId })
-      .select('brand model photos listingCount reservePrice session lotNumber updatedAt status refusals')
+      .select('brand model registrationNumber photos listingCount reservePrice session lotNumber updatedAt status refusals')
       .sort({ updatedAt: -1 })
       .lean(),
     Sale.find({ seller: sellerId })
@@ -1227,6 +1285,7 @@ const listSellerVehicles = async (sellerId) => {
         status: sale.status,
         amount: sale.amount ?? null,
         currentStep: sale.status === 'en_cours' ? sale.currentStep : null,
+        stepKey: sale.status === 'en_cours' ? (Sale.PURCHASE_STEPS[sale.currentStep - 1] || null) : null,
         stepCount: Sale.PURCHASE_STEPS.length,
         wonAt: sale.wonAt || null,
         closedAt: sale.closedAt || null,
@@ -2549,6 +2608,7 @@ module.exports = {
   attributeVehicle,
   processSessionAttributions,
   processClosedSessions,
+  processPendingAttributionEmails,
   promoteNextBidder,
   listBuyerSales,
   getBuyerSale,

@@ -20,6 +20,8 @@ const saleService = require('./services/sale.service');
 const syncSessionsAndAttributions = async () => {
   await sessionService.autoGenerateAndSyncSessions();
   await saleService.processClosedSessions();
+  // Reprendre les notifications top 3 / réattribution qui ont échoué au premier envoi.
+  await saleService.processPendingAttributionEmails();
   // Rattrape les commissions encaissées dont le retour navigateur n'est jamais arrivé
   await saleService.reconcilePendingCommissionPayments();
   // Rappels à 50 % et 80 % du délai, puis retrait de l'attribution à l'expiration
