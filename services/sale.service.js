@@ -22,7 +22,7 @@ const OPEN_SESSION_STATUSES = ['open', 'active'];
 
 const getOfferCommissionTotal = (offer) => {
   const fees = offer?.fees;
-  const amount = Number(fees?.total ?? (Number(fees?.commission || 0) + Number(fees?.taxAmount || 0)));
+  const amount = Number(fees?.commission || 0) + Number(fees?.taxAmount || 0);
   if (!Number.isFinite(amount) || amount <= 0) {
     const err = new Error('Le montant de la commission impayée est introuvable.');
     err.codeName = 'payment.fees_missing';
@@ -740,7 +740,10 @@ const settleCommissionPayment = async (sale, { paymentIntentId, amount, currency
 
   try {
     const Payment = require('../models/payment.model');
-    const amountInEuros = (amount ?? sale.commissionPayment?.amount) ? ((amount ?? sale.commissionPayment.amount) / 100) : (sale.winningOffer?.fees?.total || sale.winningOffer?.fees?.commission || sale.fees?.commission || 300);
+    const frozenFees = sale.winningOffer?.fees || sale.fees;
+    const amountInEuros = (amount ?? sale.commissionPayment?.amount)
+      ? ((amount ?? sale.commissionPayment.amount) / 100)
+      : (Number(frozenFees?.commission || 0) + Number(frozenFees?.taxAmount || 0));
     await Payment.create({
       user: sale.winner,
       sale: sale._id,

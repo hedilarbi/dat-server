@@ -5,6 +5,8 @@ const commissionService = require('./commission.service');
 const generalConfigService = require('./generalConfig.service');
 const notificationService = require('./notification.service');
 const { nextLotNumber } = require('../models/counter.model');
+const { sendEmail } = require('../config/mail');
+const { adminVehicleMaxAttemptsEmail } = require('./emailTemplates.service');
 
 /**
  * Récupère ou initialise la configuration des sessions (Lundi, Mercredi, Vendredi, 48h)
@@ -163,12 +165,23 @@ const autoGenerateAndSyncSessions = async () => {
  * le nombre de mises en vente autorisé sans trouver preneur. Un échec d'envoi ne doit jamais
  * faire échouer l'affectation elle-même.
  */
-const notifyAdminOfMaxAttempts = async (vehicle, listingCount) => {
+const notifyAdminOfMaxAttempts = async (vehicle, listingCount, adminEmail) => {
   try {
     const seller = await User.findById(vehicle.seller).select('companyName firstName lastName');
     await notificationService.createAdminVehicleMaxAttemptsNotification(vehicle, seller, listingCount);
+
+    const vehicleLabel = [vehicle.brand, vehicle.model, vehicle.year].filter(Boolean).join(' ') || 'Véhicule';
+    const sellerLabel = seller?.companyName || [seller?.firstName, seller?.lastName].filter(Boolean).join(' ') || 'Vendeur inconnu';
+    const email = adminVehicleMaxAttemptsEmail({
+      dossierId: String(vehicle._id),
+      vehicleLabel,
+      registrationNumber: vehicle.registrationNumber || '',
+      sellerLabel,
+      listingCount,
+    });
+    await sendEmail({ to: adminEmail, ...email });
   } catch (err) {
-    console.error(`Erreur lors de la notification admin (tentatives max, véhicule ${vehicle._id}) : ${err.message}`);
+    console.error(`Erreur lors de l'alerte admin (tentatives max, véhicule ${vehicle._id}) : ${err.message}`);
   }
 };
 
@@ -199,10 +212,10 @@ const assignVehicleToSession = async (vehicle, sessionId) => {
   await vehicle.save();
 
   if (isNewListing) {
-    const { vehicleListingAttempts } = await generalConfigService.getConfig();
+    const { vehicleListingAttempts, adminEmail } = await generalConfigService.getConfig();
     const threshold = Number(vehicleListingAttempts) || 3;
     if (vehicle.listingCount === threshold) {
-      await notifyAdminOfMaxAttempts(vehicle, vehicle.listingCount);
+      await notifyAdminOfMaxAttempts(vehicle, vehicle.listingCount, adminEmail);
     }
   }
 

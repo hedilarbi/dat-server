@@ -392,7 +392,9 @@ const getDashboardStats = async () => {
     .sort({ createdAt: -1 })
     .limit(5)
     .select('firstName lastName companyName role email createdAt status');
-  // Late payments (Step 1 or 2, >80% time elapsed or overdue)
+  // Ventes critiques : étape 1 ou 2 entre 80 % et 100 % du délai courant.
+  // Une échéance expirée est traitée par la réattribution et ne doit plus rester dans
+  // ce tableau. Le candidat suivant repart avec son propre chronomètre à zéro.
   const allCurrentPayments = await Sale.find({
     status: 'en_cours',
     currentStep: { $in: [1, 2] },
@@ -414,7 +416,7 @@ const getDashboardStats = async () => {
             ? new Date(sale.createdAt)
             : null;
 
-      if (now >= dueAt) return true; // Déjà dépassé
+      if (now >= dueAt) return false;
       if (!startedAt) return false;
 
       const total = dueAt.getTime() - startedAt.getTime();
@@ -481,7 +483,10 @@ const listPayments = async (filters = {}) => {
 
     for (const sale of paidSales) {
       if (!sale.winner) continue;
-      const amountInEuros = sale.commissionPayment?.amount ? sale.commissionPayment.amount / 100 : (sale.winningOffer?.fees?.total || sale.winningOffer?.fees?.commission || sale.fees?.commission || 300);
+      const frozenFees = sale.winningOffer?.fees || sale.fees;
+      const amountInEuros = sale.commissionPayment?.amount
+        ? sale.commissionPayment.amount / 100
+        : (Number(frozenFees?.commission || 0) + Number(frozenFees?.taxAmount || 0));
       try {
         await Payment.create({
           user: sale.winner._id,

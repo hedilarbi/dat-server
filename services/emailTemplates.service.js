@@ -647,6 +647,35 @@ const adminLatePaymentAlertEmail = ({ vehicleLabel, buyerName, buyerEmail, saleI
   };
 };
 
+/** Alerte lorsqu'un véhicule atteint le seuil de mises en vente configuré. */
+const adminVehicleMaxAttemptsEmail = ({ dossierId, vehicleLabel, registrationNumber, sellerLabel, listingCount }) => {
+  const adminBaseUrl = process.env.ADMIN_BASE_URL || process.env.ADMIN_URL || 'http://localhost:3002';
+  const url = `${adminBaseUrl.replace(/\/$/, '')}/dossiers/${dossierId}`;
+
+  return {
+    subject: `Action requise : ${vehicleLabel} a atteint ${listingCount} mises en vente - DealAutoPro`,
+    text: `Le véhicule ${vehicleLabel}${registrationNumber ? ` (${registrationNumber})` : ''} de ${sellerLabel} a atteint ${listingCount} mises en vente sans trouver preneur. Consultez le dossier : ${url}`,
+    html: layout({
+      heading: 'Nombre maximal de mises en vente atteint',
+      footer: 'Système de supervision DealAutoPro',
+      body: `
+        <p style="color: #1A2230; font-size: 16px;">Bonjour,</p>
+        <p style="color: #5A5E66; font-size: 14px;">Un véhicule nécessite une décision commerciale.</p>
+        <div style="background-color: #FFF7F1; border-left: 4px solid #D9704F; padding: 15px; margin: 20px 0;">
+          <p style="margin: 0 0 10px 0;"><strong>Véhicule :</strong> ${vehicleLabel}</p>
+          ${registrationNumber ? `<p style="margin: 0 0 10px 0;"><strong>Immatriculation :</strong> ${registrationNumber}</p>` : ''}
+          <p style="margin: 0 0 10px 0;"><strong>Vendeur :</strong> ${sellerLabel}</p>
+          <p style="margin: 0; color: #B04A2C; font-weight: bold;">${listingCount} mises en vente ont été enregistrées sans vente finalisée.</p>
+        </div>
+        <p style="color: #5A5E66; font-size: 14px;">Vous pouvez revoir le prix de réserve, republier le véhicule ou décider de le retirer.</p>
+        <div style="text-align: center; margin: 30px 0;">
+          <a href="${url}" style="background-color: #D9704F; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold;">Ouvrir le dossier</a>
+        </div>
+      `
+    })
+  };
+};
+
 /**
  * Information envoyée à l'acheteur écarté : le délai de l'étape est dépassé,
  * le véhicule passe au candidat suivant de la liste d'attente.
@@ -1478,6 +1507,7 @@ module.exports = {
   saleWonEmail,
   saleStepReminderEmail,
   adminLatePaymentAlertEmail,
+  adminVehicleMaxAttemptsEmail,
   saleWinnerRemovedEmail,
   saleReattributedWinnerEmail,
   saleWaitingListEmail,

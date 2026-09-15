@@ -50,7 +50,7 @@ const normalizePendingCommission = async (user) => {
   } else if (entry.discardReason.startsWith('commission') || entry.discardReason === 'annulation_volontaire') {
     const offer = await Offer.findById(entry.offer).select('fees').lean();
     reason = 'commission_impayee';
-    amount = Number(offer?.fees?.total ?? (Number(offer?.fees?.commission || 0) + Number(offer?.fees?.taxAmount || 0)));
+    amount = Number(offer?.fees?.commission || 0) + Number(offer?.fees?.taxAmount || 0);
   }
 
   if (!reason || !Number.isFinite(Number(amount)) || Number(amount) <= 0) return user;
@@ -578,6 +578,7 @@ const confirmPendingCommissionPayment = async (userId, checkoutSessionId) => {
   const user = await User.findById(userId);
   if (!user) throw new Error('Utilisateur introuvable.');
   if (!user.pendingCommission?.amount) return user; // Déjà réglée
+  await normalizePendingCommission(user);
 
   const session = await paymentService.retrieveCommissionCheckout(checkoutSessionId);
   if (session.purpose !== 'pending_commission' || String(session.userId) !== String(userId)) {
@@ -588,6 +589,13 @@ const confirmPendingCommissionPayment = async (userId, checkoutSessionId) => {
   if (!session.paid) {
     const err = new Error('Paiement non abouti.');
     err.codeName = 'payment.not_paid';
+    throw err;
+  }
+  const expectedAmount = paymentService.toMinorUnits(user.pendingCommission.amount);
+  if (Number(session.amount) !== expectedAmount) {
+    const err = new Error('Le montant payé ne correspond pas à la commission due. Veuillez relancer le paiement.');
+    err.codeName = 'payment.invalid_amount';
+    err.statusCode = 400;
     throw err;
   }
 
