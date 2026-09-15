@@ -869,7 +869,7 @@ const saleBuyerConfirmedSellerEmail = ({ user, brand, model, year, photoUrl, ses
     heading: 'L’acheteur a été confirmé',
     hello: `Bonjour ${user.firstName} ${user.lastName},`,
     subtitle: [year ? `Année ${year}` : null, sessionName].filter(Boolean).join(' · '),
-    line1: `L’acheteur de votre ${vehicleLabel} a réglé sa commission et vient d’être confirmé.`,
+    line1: `L’acheteur de votre ${vehicleLabel}  vient d’être confirmé.`,
     line2: 'Il est maintenant en train d’effectuer le virement du prix du véhicule sur votre compte.',
     line3: 'Veuillez confirmer la réception du virement dès que vous le recevez afin de faire avancer le processus de vente.',
     cta: 'Ouvrir la vente',
@@ -880,7 +880,7 @@ const saleBuyerConfirmedSellerEmail = ({ user, brand, model, year, photoUrl, ses
     heading: 'The buyer has been confirmed',
     hello: `Hello ${user.firstName} ${user.lastName},`,
     subtitle: [year ? `Year ${year}` : null, sessionName].filter(Boolean).join(' · '),
-    line1: `The buyer of your ${vehicleLabel} has paid the platform commission and has now been confirmed.`,
+    line1: `The buyer of your ${vehicleLabel}  has now been confirmed.`,
     line2: 'They are now transferring the vehicle price to your bank account.',
     line3: 'Please confirm receipt as soon as the funds arrive so the sale process can continue.',
     cta: 'Open the sale',
@@ -1531,11 +1531,13 @@ const sellerStampRequiredEmail = ({ user, brand, model, saleId }) => {
   return {
     subject: copy.subject,
     text: copy.text,
-    html: layout({ heading: copy.heading, footer: lang === 'fr' ? "L'équipe DealAutoPro" : 'The DealAutoPro team', body: `
+    html: layout({
+      heading: copy.heading, footer: lang === 'fr' ? "L'équipe DealAutoPro" : 'The DealAutoPro team', body: `
       <p style="color:#1A2230;font-size:16px;">${lang === 'fr' ? `Bonjour ${user.firstName} ${user.lastName},` : `Hello ${user.firstName} ${user.lastName},`}</p>
       <p style="color:#5A5E66;font-size:14px;">${copy.intro}</p>
       <p style="color:#13243C;font-size:14px;font-weight:bold;">${copy.action}</p>
-      <div style="text-align:center;margin:30px 0;"><a href="${url}" style="background-color:#D9704F;color:white;padding:12px 25px;text-decoration:none;border-radius:5px;font-weight:bold;">${copy.cta}</a></div>` }),
+      <div style="text-align:center;margin:30px 0;"><a href="${url}" style="background-color:#D9704F;color:white;padding:12px 25px;text-decoration:none;border-radius:5px;font-weight:bold;">${copy.cta}</a></div>`
+    }),
   };
 };
 
@@ -1561,11 +1563,13 @@ const buyerSellerStampValidationEmail = ({ user, brand, model, saleId }) => {
   return {
     subject: copy.subject,
     text: copy.text,
-    html: layout({ heading: copy.heading, footer: lang === 'fr' ? "L'équipe DealAutoPro" : 'The DealAutoPro team', body: `
+    html: layout({
+      heading: copy.heading, footer: lang === 'fr' ? "L'équipe DealAutoPro" : 'The DealAutoPro team', body: `
       <p style="color:#1A2230;font-size:16px;">${lang === 'fr' ? `Bonjour ${user.firstName} ${user.lastName},` : `Hello ${user.firstName} ${user.lastName},`}</p>
       <p style="color:#5A5E66;font-size:14px;">${copy.intro}</p>
       <p style="color:#13243C;font-size:14px;font-weight:bold;">${copy.action}</p>
-      <div style="text-align:center;margin:30px 0;"><a href="${url}" style="background-color:#2F6F4F;color:white;padding:12px 25px;text-decoration:none;border-radius:5px;font-weight:bold;">${copy.cta}</a></div>` }),
+      <div style="text-align:center;margin:30px 0;"><a href="${url}" style="background-color:#2F6F4F;color:white;padding:12px 25px;text-decoration:none;border-radius:5px;font-weight:bold;">${copy.cta}</a></div>`
+    }),
   };
 };
 
