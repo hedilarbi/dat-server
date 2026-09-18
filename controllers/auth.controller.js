@@ -329,7 +329,7 @@ const startPendingCommissionIntent = async (req, res, next) => {
 
 const confirmPendingCommissionPayment = async (req, res, next) => {
   try {
-    const user = await authService.confirmPendingCommissionPayment(req.user._id, req.body.checkoutSessionId);
+    const user = await authService.confirmPendingCommissionPayment(req.user._id, req.body.checkoutSessionId, req.body.paymentIntentId);
     res.status(200).json({
       success: true,
       message: 'Commission réglée. Votre compte est réactivé.',

@@ -129,7 +129,7 @@ const createAdminLatePaymentNotification = async (sale, vehicle, buyer) => {
     type: 'late_payment_alert',
     category: 'ventes',
     title: `Alerte: Paiement véhicule en retard`,
-    message: `L'acheteur ${buyer.firstName} ${buyer.lastName} a dépassé 80% du délai pour payer le véhicule ${vehicleLabel}.`,
+    message: `L'acheteur ${buyer.firstName} ${buyer.lastName} a atteint 75 % du délai pour payer le véhicule ${vehicleLabel}.`,
     metadata: {
       saleId: sale._id.toString(),
       vehicleId: vehicle._id.toString(),

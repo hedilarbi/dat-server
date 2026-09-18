@@ -98,6 +98,14 @@ router.get('/current-sales', attachUserIfAuthenticated, async (req, res) => {
         ])
       : [0, [], []];
 
+    const activeOffers = req.user && dossiers.length
+      ? await Offer.find({
+          buyer: req.user._id,
+          vehicle: { $in: dossiers.map((dossier) => dossier._id) },
+          status: 'active',
+        }).select('vehicle').lean()
+      : [];
+    const offeredVehicleIds = new Set(activeOffers.map((offer) => String(offer.vehicle)));
     const sessionsById = new Map(sessions.map((session) => [String(session._id), session]));
     const vehicles = dossiers.map((dossier) => {
       const session = sessionsById.get(String(dossier.session));
@@ -105,6 +113,7 @@ router.get('/current-sales', attachUserIfAuthenticated, async (req, res) => {
 
       return {
         id: String(dossier._id),
+        hasActiveOffer: offeredVehicleIds.has(String(dossier._id)),
         brand: dossier.brand || '',
         model: dossier.model || '',
         year: dossier.year ?? null,

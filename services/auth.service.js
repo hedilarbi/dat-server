@@ -574,25 +574,58 @@ const startPendingCommissionIntent = async (userId) => {
   });
 };
 
-const confirmPendingCommissionPayment = async (userId, checkoutSessionId) => {
+const confirmPendingCommissionPayment = async (userId, checkoutSessionId, paymentIntentId) => {
   const user = await User.findById(userId);
   if (!user) throw new Error('Utilisateur introuvable.');
-  if (!user.pendingCommission?.amount) return user; // Déjà réglée
+  if (!user.pendingCommission?.amount) {
+    const userObj = user.toObject();
+    delete userObj.password;
+    delete userObj.otp;
+    return userObj; // Déjà réglée
+  }
   await normalizePendingCommission(user);
 
-  const session = await paymentService.retrieveCommissionCheckout(checkoutSessionId);
-  if (session.purpose !== 'pending_commission' || String(session.userId) !== String(userId)) {
+  if (!checkoutSessionId && !paymentIntentId) {
+    const debtSale = user.pendingCommission.saleId
+      ? await Sale.findById(user.pendingCommission.saleId).select('waitingList').lean()
+      : null;
+    const discardedAt = debtSale?.waitingList?.find((entry) => String(entry.buyer) === String(userId))?.discardedAt;
+    const candidates = await paymentService.findPaidPendingCommissionIntents(
+      userId, user.pendingCommission.amount, user.pendingCommission.reason || 'commission_impayee',
+      user.pendingCommission.saleId, discardedAt
+    );
+    const Payment = require('../models/payment.model');
+    for (const candidateId of candidates) {
+      if (!await Payment.exists({ stripePaymentIntentId: candidateId, status: 'paye' })) {
+        paymentIntentId = candidateId;
+        break;
+      }
+    }
+    if (!paymentIntentId) {
+      throw paymentService.paymentError('Aucun paiement confirmé trouvé.', 'payment.not_found', 404);
+    }
+  }
+  const payment = paymentIntentId
+    ? await paymentService.retrievePendingCommissionPaymentIntent(paymentIntentId)
+    : await paymentService.retrieveCommissionCheckout(checkoutSessionId);
+  if (payment.purpose !== 'pending_commission' || String(payment.userId) !== String(userId)) {
     const err = new Error('Session de paiement invalide.');
     err.codeName = 'payment.invalid_session';
+    err.statusCode = 400;
     throw err;
   }
-  if (!session.paid) {
+  if (paymentIntentId && (payment.debtReason !== (user.pendingCommission.reason || 'commission_impayee')
+    || (payment.saleId && String(payment.saleId) !== String(user.pendingCommission.saleId)))) {
+    throw paymentService.paymentError('Paiement lié à une autre dette.', 'payment.invalid_debt', 400);
+  }
+  if (!payment.paid) {
     const err = new Error('Paiement non abouti.');
     err.codeName = 'payment.not_paid';
+    err.statusCode = 400;
     throw err;
   }
   const expectedAmount = paymentService.toMinorUnits(user.pendingCommission.amount);
-  if (Number(session.amount) !== expectedAmount) {
+  if (Number(payment.amount) !== expectedAmount || payment.currency !== 'eur') {
     const err = new Error('Le montant payé ne correspond pas à la commission due. Veuillez relancer le paiement.');
     err.codeName = 'payment.invalid_amount';
     err.statusCode = 400;
@@ -609,6 +642,8 @@ const confirmPendingCommissionPayment = async (userId, checkoutSessionId) => {
       amount: user.pendingCommission.amount,
       currency: 'eur',
       stripeSessionId: checkoutSessionId || null,
+      stripePaymentIntentId: paymentIntentId || payment.paymentIntentId || null,
+      mode: paymentIntentId ? 'payment_intent' : 'checkout',
       status: 'paye',
       paidAt: new Date(),
     });

@@ -635,7 +635,7 @@ const adminLatePaymentAlertEmail = ({ vehicleLabel, buyerName, buyerEmail, saleI
         <div style="background-color: #fff7f1; border-left: 4px solid #B04A2C; padding: 15px; margin: 20px 0;">
           <p style="margin: 0 0 10px 0;"><strong>Véhicule :</strong> ${vehicleLabel}</p>
           <p style="margin: 0 0 10px 0;"><strong>Acheteur :</strong> ${buyerName} (${buyerEmail})</p>
-          <p style="margin: 0; color: #B04A2C; font-weight: bold;">Le délai autorisé a dépassé les 80%.</p>
+          <p style="margin: 0; color: #B04A2C; font-weight: bold;">Le délai autorisé a atteint 75 %.</p>
           <p style="margin: 5px 0 0 0;">Temps restant avant annulation automatique : ~${remainingHours} heure(s).</p>
         </div>
         <p style="color: #5A5E66; font-size: 14px;">Vous pouvez contacter l'acheteur ou préparer la réattribution de cette vente.</p>
@@ -753,6 +753,16 @@ const saleWinnerRemovedEmail = ({ user, brand, model, year, photoUrl, sessionNam
  * qui lui permet de décider s'il republie au même prix de réserve ou plus bas. Sans aucune
  * offre, le message le dit franchement plutôt que d'afficher un montant vide.
  */
+const saleReattributionExhaustedSellerEmail = ({ user, vehicle }) => {
+  const fr = normalizeLanguage(user.language) === 'fr';
+  const label = [vehicle?.brand, vehicle?.model].filter(Boolean).join(' ') || (fr ? 'Votre véhicule' : 'Your vehicle');
+  const subject = fr ? `${label} : retour en attente de session - DealAutoPro` : `${label}: awaiting another session - DealAutoPro`;
+  const message = fr
+    ? `Les acheteurs éligibles pour ${label} n'ont pas finalisé la vente. Votre véhicule est de nouveau en attente de session. Nous vous informerons de la suite.`
+    : `The eligible buyers for ${label} did not complete the sale. Your vehicle is awaiting another session. We will keep you informed.`;
+  return { subject, text: message, html: layout({ heading: subject, body: `<p>${message}</p>`, footer: 'DealAutoPro' }) };
+};
+
 const saleUnsoldSellerEmail = ({ user, brand, model, year, photoUrl, sessionName, reservePrice, bestOffer, offerCount }) => {
   const lang = normalizeLanguage(user.language);
   const locale = lang === 'fr' ? 'fr-FR' : 'en-GB';
@@ -1515,6 +1525,7 @@ module.exports = {
   saleBuyerConfirmedSellerEmail,
   saleReattributedSellerEmail,
   saleUnsoldSellerEmail,
+  saleReattributionExhaustedSellerEmail,
   saleCertificateReadyEmail,
   saleSignedCertificateSellerEmail,
   saleCertificateRejectedBuyerEmail,

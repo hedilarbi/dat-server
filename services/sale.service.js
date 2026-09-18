@@ -389,6 +389,20 @@ const processPendingAttributionEmails = async () => {
  * confirmation intermédiaire : le nouveau gagnant est informé par e-mail que son offre est
  * retenue suite au retrait du précédent, faute pour celui-ci d'avoir respecté les règles.
  */
+const notifySellerReattributionExhausted = async (sale) => {
+  try {
+    const [seller, vehicle] = await Promise.all([
+      User.findById(sale.seller).select('email firstName lastName language').lean(),
+      VehicleDossier.findById(sale.vehicle).select('brand model year').lean(),
+    ]);
+    if (!seller?.email) return;
+    const email = emailTemplates.saleReattributionExhaustedSellerEmail({ user: seller, vehicle });
+    await sendEmail({ to: seller.email, ...email });
+  } catch (error) {
+    console.error(`Notification de retour en attente impossible (vente ${sale._id}) : ${error.message}`);
+  }
+};
+
 const promoteNextBidder = async (saleId, reason = 'delai_depasse') => {
   const sale = await Sale.findById(saleId);
   if (!sale) {
@@ -412,7 +426,7 @@ const promoteNextBidder = async (saleId, reason = 'delai_depasse') => {
 
   let next = null;
   const candidates = sale.waitingList
-    .filter((entry) => entry.rank > sale.currentRank && entry.status !== 'ecarte')
+    .filter((entry) => entry.rank > sale.currentRank && entry.rank <= 3 && entry.status !== 'ecarte')
     .sort((a, b) => a.rank - b.rank);
 
   for (const candidate of candidates) {
@@ -437,6 +451,7 @@ const promoteNextBidder = async (saleId, reason = 'delai_depasse') => {
     await sale.save();
     // Comme à la clôture sans offre retenue, le véhicule redevient disponible
     await VehicleDossier.updateOne({ _id: sale.vehicle }, { $set: { session: null } });
+    await notifySellerReattributionExhausted(sale);
     return sale;
   }
 
@@ -476,15 +491,16 @@ const promoteNextBidder = async (saleId, reason = 'delai_depasse') => {
 
 /**
  * Lorsqu'un acheteur est suspendu (délai dépassé, annulation, suspension admin...),
- * toutes ses autres ventes en cours à l'étape 1 ou 2 lui sont retirées et attribuées
+ * toutes ses autres ventes en cours à l'étape 1 lui sont retirées et attribuées
  * au candidat suivant.
  */
-const revokeOngoingSalesForSuspendedBuyer = async (buyerId, reason = 'compte_suspendu') => {
+const revokeOngoingSalesForSuspendedBuyer = async (buyerId, reason = 'compte_suspendu', excludedSaleId = null) => {
   if (!buyerId) return;
   const ongoingSales = await Sale.find({
     winner: buyerId,
     status: 'en_cours',
-    currentStep: { $in: [1, 2] },
+    currentStep: 1,
+    ...(excludedSaleId ? { _id: { $ne: excludedSaleId } } : {}),
   });
 
   for (const sale of ongoingSales) {
@@ -705,7 +721,7 @@ const loadSaleAwaitingCommission = async (saleId, buyerId) => {
   }
 
   // Un compte suspendu ne peut pas démarrer une nouvelle vente (étape 1).
-  // Les ventes déjà en cours à l'étape ≥ 3 restent accessibles (vérifié par la step ci-dessus).
+  // Les ventes déjà en cours à partir de l'étape 2 restent accessibles.
   const buyer = await User.findById(buyerId).select('status').lean();
   if (buyer && buyer.status === 'suspendu') {
     const err = new Error('Votre compte est suspendu. Réglez votre commission impayée pour débloquer votre compte.');
@@ -1031,6 +1047,16 @@ const processStepDeadlines = async () => {
 
   for (const sale of sales) {
     try {
+      // Une autre vente expirée du même acheteur peut avoir réattribué celle-ci
+      // depuis la lecture initiale du lot.
+      const stillCurrent = await Sale.exists({
+        _id: sale._id,
+        status: 'en_cours',
+        winner: sale.winner,
+        currentStep: sale.currentStep,
+        currentStepDueAt: sale.currentStepDueAt,
+      });
+      if (!stillCurrent) continue;
       const stepKey = Sale.PURCHASE_STEPS[sale.currentStep - 1];
       const vehicle = sale.vehicle;
       const sessionName = sale.session?.name || '';
@@ -1051,27 +1077,27 @@ const processStepDeadlines = async () => {
             // Étape 1 : le délai de paiement de la commission est dépassé pour le tout
             // premier gagnant. Il perd la vente, son compte est suspendu et il doit régler
             // la commission qu'il n'a pas payée pour débloquer son compte.
-            buyer.pendingCommission = {
+            if (!buyer.pendingCommission?.saleId) buyer.pendingCommission = {
               amount: getOfferCommissionTotal(sale.winningOffer),
               saleId: sale._id,
               reason: 'commission_impayee',
             };
             buyer.status = 'suspendu';
             await buyer.save();
-            await revokeOngoingSalesForSuspendedBuyer(buyer._id, `${stepKey}_delai_depasse`);
+            await revokeOngoingSalesForSuspendedBuyer(buyer._id, `${stepKey}_delai_depasse`, sale._id);
             suspended = true;
           } else if (stepKey === 'virement_carte_grise') {
             // Étape 2 : le délai de virement (paiement du véhicule) est dépassé.
             // L'acheteur perd la vente et son compte est suspendu.
             const { accountReactivationFee } = await generalConfigService.getConfig();
-            buyer.pendingCommission = {
+            if (!buyer.pendingCommission?.saleId) buyer.pendingCommission = {
               amount: accountReactivationFee,
               saleId: sale._id,
               reason: 'penalite_etape_2',
             };
             buyer.status = 'suspendu';
             await buyer.save();
-            await revokeOngoingSalesForSuspendedBuyer(buyer._id, `${stepKey}_delai_depasse`);
+            await revokeOngoingSalesForSuspendedBuyer(buyer._id, `${stepKey}_delai_depasse`, sale._id);
             suspended = true;
           }
         }
@@ -1098,13 +1124,13 @@ const processStepDeadlines = async () => {
       const elapsedPercent = ((now.getTime() - startedAt.getTime()) / total) * 100;
       const due = REMINDER_THRESHOLDS
         .filter((threshold) => elapsedPercent >= threshold && !sale.stepRemindersSent.includes(threshold));
-      if (due.length === 0) continue;
+      const adminAlertDue = stepKey === 'virement_carte_grise'
+        && elapsedPercent >= 75 && !sale.stepRemindersSent.includes(75);
+      if (due.length === 0 && !adminAlertDue) continue;
 
       // Un seul rappel par passage : le seuil le plus élevé atteint
-      const threshold = due[due.length - 1];
       const remainingMs = dueAt.getTime() - now.getTime();
-      
-      await notifyBuyer(sale.winner, (buyer) => emailTemplates.saleStepReminderEmail({
+      if (due.length > 0) await notifyBuyer(sale.winner, (buyer) => emailTemplates.saleStepReminderEmail({
         user: buyer,
         brand: vehicle?.brand || '',
         model: vehicle?.model || '',
@@ -1116,7 +1142,7 @@ const processStepDeadlines = async () => {
         remainingMs,
       }));
 
-      if (threshold === 80 && stepKey === 'paiement_vehicule') {
+      if (adminAlertDue) {
         try {
           const buyer = await User.findById(sale.winner);
           if (buyer) {
@@ -1133,6 +1159,7 @@ const processStepDeadlines = async () => {
               remainingMs
             });
             await sendEmail({ to: adminEmail, subject: email.subject, text: email.text, html: email.html });
+            sale.stepRemindersSent.push(75);
           }
         } catch (adminErr) {
           console.error(`Impossible de notifier l'admin du retard de paiement (vente ${sale._id}) :`, adminErr.message);

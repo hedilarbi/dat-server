@@ -120,7 +120,7 @@ app.get('/health', (req, res) => {
 app.use(errorHandler);
 
 // Démarrage du serveur
-const PORT = process.env.PORT || 5002;
+const PORT = process.env.PORT || 5000;
 const HOST = process.env.HOST || '0.0.0.0';
 app.listen(PORT, HOST, () => {
   const lanAddress = Object.values(os.networkInterfaces())

@@ -32,7 +32,7 @@ const protect = async (req, res, next) => {
 
     // Un compte suspendu a un accès restreint :
     // - auth/me + logout + règlement commission impayée + support : toujours autorisés
-    // - routes /sales : autorisées (le service vérifie que la vente est à l'étape ≥ 3)
+    // - routes /sales : autorisées pour poursuivre les ventes conservées dès l'étape 2
     // - tout le reste : bloqué
     if (user.status === 'suspendu') {
       const fullPath = (req.baseUrl || '') + (req.path || '');

@@ -166,6 +166,7 @@ const createPendingCommissionCheckout = async ({ amount, reason, user, language 
       userId: String(user._id),
       purpose: 'pending_commission',
       debtReason: reason || 'commission_impayee',
+      saleId: user.pendingCommission?.saleId ? String(user.pendingCommission.saleId) : '',
     },
   });
 
@@ -182,10 +183,43 @@ const createPendingCommissionPaymentIntent = async ({ amount, reason, user }) =>
       userId: String(user._id),
       purpose: 'pending_commission',
       debtReason: reason || 'commission_impayee',
+      saleId: user.pendingCommission?.saleId ? String(user.pendingCommission.saleId) : '',
     },
   });
 
-  return { clientSecret: intent.client_secret, amount: toMinorUnits(amount) };
+  return { clientSecret: intent.client_secret, paymentIntentId: intent.id, amount: toMinorUnits(amount) };
+};
+
+const retrievePendingCommissionPaymentIntent = async (paymentIntentId) => {
+  const intent = await getStripe().paymentIntents.retrieve(paymentIntentId);
+  return {
+    id: intent.id,
+    paid: intent.status === 'succeeded',
+    userId: intent.metadata?.userId || null,
+    purpose: intent.metadata?.purpose || null,
+    debtReason: intent.metadata?.debtReason || null,
+    saleId: intent.metadata?.saleId || null,
+    amount: intent.amount_received ?? intent.amount ?? null,
+    currency: intent.currency || null,
+  };
+};
+
+// Rattrape les paiements mobiles effectués avant que l'application confirme l'intent.
+// La recherche est réservée à cette récupération historique, jamais au retour immédiat
+// de PaymentSheet (l'index de recherche Stripe est éventuellement cohérent).
+const findPaidPendingCommissionIntents = async (userId, amount, reason, saleId, createdAfter) => {
+  const result = await getStripe().paymentIntents.search({
+    query: `metadata['userId']:'${String(userId)}' AND metadata['purpose']:'pending_commission'`,
+    limit: 100,
+  });
+  return result.data.filter((intent) =>
+    intent.status === 'succeeded'
+    && intent.metadata?.debtReason === reason
+    && (!intent.metadata?.saleId || intent.metadata.saleId === String(saleId))
+    && (!createdAfter || intent.created * 1000 >= createdAfter.getTime())
+    && intent.currency === 'eur'
+    && (intent.amount_received ?? intent.amount) === toMinorUnits(amount)
+  ).map((intent) => intent.id);
 };
 
 module.exports = {
@@ -196,5 +230,7 @@ module.exports = {
   retrieveCommissionPaymentIntent,
   createPendingCommissionCheckout,
   createPendingCommissionPaymentIntent,
+  retrievePendingCommissionPaymentIntent,
+  findPaidPendingCommissionIntents,
   toMinorUnits,
 };
