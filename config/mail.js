@@ -9,9 +9,9 @@ const getExpoModule = async () => {
   return expoModulePromise;
 };
 
-const smtpUser = process.env.SMTP_USER || process.env.GMAIL_USER;
+const smtpUser = process.env.SMTP_USER || 'contact@dealautopro.com';
 const smtpPassword = process.env.SMTP_PASS || process.env.GMAIL_APP_PASSWORD;
-const smtpHost = process.env.SMTP_HOST || 'smtp.gmail.com';
+const smtpHost = process.env.SMTP_HOST || 'smtp.hostinger.com';
 const smtpPort = Number(process.env.SMTP_PORT || 465);
 const smtpSecure = process.env.SMTP_SECURE
   ? process.env.SMTP_SECURE === 'true'
