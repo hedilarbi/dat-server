@@ -294,6 +294,7 @@ const correctionEmail = ({ user, reasonsText, reasonsPlain, comment }) => {
 
 const dossierApprovalEmail = ({ user, vehicleLabel }) => {
   const lang = normalizeLanguage(user.language);
+  const url = `${CLIENT_BASE_URL.replace(/\/$/, '')}${lang === 'en' ? '/en/seller/for-sale' : '/fr/vendeur/en-vente'}`;
   const copy = {
     fr: {
       subject: 'Votre dossier véhicule a été validé ! - DealAutoPro',
@@ -301,8 +302,8 @@ const dossierApprovalEmail = ({ user, vehicleLabel }) => {
       hello: `Bonjour ${user.firstName} ${user.lastName},`,
       line1: `Nous avons le plaisir de vous informer que votre dossier véhicule "${vehicleLabel}" a été vérifié et validé.`,
       line2: 'Il sera prochainement programmé dans une session d\'appel d\'offres.',
-      cta: 'Voir mes dossiers',
-      text: `Votre dossier véhicule "${vehicleLabel}" a été validé par notre équipe.`,
+      cta: 'Voir mes véhicules en vente',
+      text: `Votre dossier véhicule "${vehicleLabel}" a été validé par notre équipe. Consultez vos véhicules en vente : ${url}`,
       footer: "L'équipe DealAutoPro"
     },
     en: {
@@ -311,8 +312,8 @@ const dossierApprovalEmail = ({ user, vehicleLabel }) => {
       hello: `Hello ${user.firstName} ${user.lastName},`,
       line1: `We are pleased to inform you that your vehicle file "${vehicleLabel}" has been reviewed and approved.`,
       line2: 'It will soon be scheduled in an auction session.',
-      cta: 'View my files',
-      text: `Your vehicle file "${vehicleLabel}" has been approved by our team.`,
+      cta: 'View my vehicles for sale',
+      text: `Your vehicle file "${vehicleLabel}" has been approved by our team. View your vehicles for sale: ${url}`,
       footer: 'The DealAutoPro team'
     }
   }[lang];
@@ -328,7 +329,7 @@ const dossierApprovalEmail = ({ user, vehicleLabel }) => {
         <p style="color: #5A5E66; font-size: 14px;">${copy.line1}</p>
         <p style="color: #5A5E66; font-size: 14px;">${copy.line2}</p>
         <div style="text-align: center; margin: 30px 0;">
-          <a href="https://dealautopro.com/vendeur/dossiers" style="background-color: #13243C; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold;">${copy.cta}</a>
+          <a href="${url}" style="background-color: #13243C; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold;">${copy.cta}</a>
         </div>
       `
     })
@@ -389,6 +390,7 @@ const dossierRejectionEmail = ({ user, vehicleLabel, reasonsText, reasonsPlain, 
 
 const dossierCorrectionEmail = ({ user, vehicleLabel, reasonsText, reasonsPlain, comment }) => {
   const lang = normalizeLanguage(user.language);
+  const url = `${CLIENT_BASE_URL.replace(/\/$/, '')}${lang === 'en' ? '/en/seller/files' : '/fr/vendeur/dossiers'}`;
   const copy = {
     fr: {
       subject: 'Action requise : Correction de votre dossier véhicule - DealAutoPro',
@@ -399,7 +401,7 @@ const dossierCorrectionEmail = ({ user, vehicleLabel, reasonsText, reasonsPlain,
       comment: "Commentaire de l'administrateur :",
       line2: 'Merci de vous connecter sur votre espace et de mettre à jour votre dossier avec les éléments demandés.',
       cta: 'Accéder à mon espace',
-      text: `Une correction est demandée sur votre dossier véhicule "${vehicleLabel}" pour les raisons suivantes : ${reasonsPlain}. Commentaire : ${comment || ''}.`,
+      text: `Une correction est demandée sur votre dossier véhicule "${vehicleLabel}" pour les raisons suivantes : ${reasonsPlain}. Commentaire : ${comment || ''}. Accédez à vos dossiers : ${url}`,
       footer: "L'équipe DealAutoPro"
     },
     en: {
@@ -411,7 +413,7 @@ const dossierCorrectionEmail = ({ user, vehicleLabel, reasonsText, reasonsPlain,
       comment: 'Administrator comment:',
       line2: 'Please sign in to your workspace and update your file with the requested items.',
       cta: 'Open my workspace',
-      text: `A correction is requested on your vehicle file "${vehicleLabel}" for the following reasons: ${reasonsPlain}. Comment: ${comment || ''}.`,
+      text: `A correction is requested on your vehicle file "${vehicleLabel}" for the following reasons: ${reasonsPlain}. Comment: ${comment || ''}. Open your files: ${url}`,
       footer: 'The DealAutoPro team'
     }
   }[lang];
@@ -432,7 +434,7 @@ const dossierCorrectionEmail = ({ user, vehicleLabel, reasonsText, reasonsPlain,
         </div>
         <p style="color: #5A5E66; font-size: 14px;">${copy.line2}</p>
         <div style="text-align: center; margin: 30px 0;">
-          <a href="https://dealautopro.com/vendeur/dossiers" style="background-color: #13243C; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold;">${copy.cta}</a>
+          <a href="${url}" style="background-color: #13243C; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold;">${copy.cta}</a>
         </div>
       `
     })
