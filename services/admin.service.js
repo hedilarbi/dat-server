@@ -372,7 +372,7 @@ const updateUserStatus = async (userId, newStatus) => {
  */
 const getDashboardStats = async () => {
   // Pending actions
-  const pendingUsersCount = await User.countDocuments({ status: 'en_attente', role: { $in: ['acheteur', 'vendeur'] } });
+  const pendingUsersCount = await User.countDocuments({ status: STATUS_GROUP_MAP.attente, role: { $in: ['acheteur', 'vendeur'] } });
   const pendingDossiersCount = await VehicleDossier.countDocuments({ status: 'soumis' });
   const pendingTicketsCount = await Ticket.countDocuments({ status: 'en_attente_admin' });
 
