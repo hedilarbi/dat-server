@@ -535,7 +535,7 @@ const saleWonEmail = ({ user, brand, model, year, photoUrl, sessionName, amount,
 const STEP_LABELS = {
   fr: {
     commission: 'Paiement de la commission',
-    virement: 'Virement au vendeur',
+    virement_carte_grise: 'Virement au vendeur',
     certificats: 'Certificats de cession',
     signature: 'Signature et dépôt des documents',
     validation_vendeur: 'Validation par le vendeur',
@@ -543,7 +543,7 @@ const STEP_LABELS = {
   },
   en: {
     commission: 'Commission payment',
-    virement: 'Transfer to the seller',
+    virement_carte_grise: 'Transfer to the seller',
     certificats: 'Transfer certificates',
     signature: 'Sign and upload documents',
     validation_vendeur: 'Seller confirmation',
