@@ -1,5 +1,7 @@
 const VehicleDossier = require('../models/vehicleDossier.model');
 const User = require('../models/user.model');
+const Offer = require('../models/offer.model');
+const mongoose = require('mongoose');
 const generalConfigService = require('./generalConfig.service');
 
 /**
@@ -44,7 +46,7 @@ const COLUMN_PATHS = {
 // multiplierait le poids de la réponse sans rien afficher de plus.
 const HEAVY_FIELDS = [
   'photos', 'expertReport', 'additionalDocuments', 'refusals',
-  'sessionDoc', 'saleDoc', '__v',
+  'sessionDoc', 'saleDoc', 'offerStats', '__v',
 ];
 
 const parseColumnFilters = (raw) => {
@@ -137,7 +139,29 @@ const enrichmentStages = () => [
   },
   { $unwind: { path: '$saleDoc', preserveNullAndEmptyArrays: true } },
   {
+    $lookup: {
+      from: 'offers',
+      let: { vehicleId: '$_id', sessionId: '$sessionDoc._id' },
+      pipeline: [
+        {
+          $match: {
+            $expr: {
+              $and: [
+                { $eq: ['$vehicle', '$$vehicleId'] },
+                { $eq: ['$session', '$$sessionId'] },
+                { $eq: ['$status', 'active'] },
+              ],
+            },
+          },
+        },
+        { $count: 'n' },
+      ],
+      as: 'offerStats',
+    },
+  },
+  {
     $addFields: {
+      offerCount: { $ifNull: [{ $arrayElemAt: ['$offerStats.n', 0] }, 0] },
       saleState: {
         $switch: {
           branches: [
@@ -285,6 +309,34 @@ const adminListVehicleSales = async (filters = {}) => {
   };
 };
 
+/** Toutes les offres déposées sur le véhicule pendant sa session actuellement rattachée. */
+const adminListVehicleOffers = async (vehicleId) => {
+  if (!mongoose.isValidObjectId(vehicleId)) {
+    const error = new Error('Véhicule introuvable.');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const vehicle = await VehicleDossier.findById(vehicleId)
+    .select('brand model registrationNumber reservePrice session')
+    .populate('session', 'name startDate endDate status')
+    .lean();
+  if (!vehicle) {
+    const error = new Error('Véhicule introuvable.');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const offers = vehicle.session
+    ? await Offer.find({ vehicle: vehicle._id, session: vehicle.session._id })
+        .populate('buyer', 'companyName firstName lastName email phone role status')
+        .sort({ amount: -1, updatedAt: 1 })
+        .lean()
+    : [];
+
+  return { vehicle, offers };
+};
+
 /**
  * Véhicules ayant atteint ou dépassé le nombre de mises en vente autorisé
  * (Configuration > Configuration générale, champ « Tentatives de mise en vente »).
@@ -339,6 +391,7 @@ const adminListMaxedOutVehicles = async ({ limit } = {}) => {
 
 module.exports = {
   adminListVehicleSales,
+  adminListVehicleOffers,
   adminListMaxedOutVehicles,
   SALE_STATES,
 };

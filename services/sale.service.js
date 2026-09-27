@@ -13,12 +13,32 @@ const { fillCertificateOfTransfer } = require('./certificateOfTransfer.service')
 const { fillPurchaseDeclaration } = require('./purchaseDeclaration.service');
 const { saveBuffer } = require('./storage.service');
 const { generateBonEnlevement } = require('./handoverDocument.service');
-const { createSignatureSession, fetchSignedDocument, fetchAuditTrail } = require('./esignature.service');
+const { createSignatureSession, fetchSignedDocument, fetchAuditTrail, fetchSignatureState } = require('./esignature.service');
 const { stampSignedBundle } = require('./signedDocumentStamp.service');
 const { isStripeConfigured } = require('../config/stripe');
 
 const CLOSED_SESSION_STATUSES = ['closed', 'cloturee'];
 const OPEN_SESSION_STATUSES = ['open', 'active'];
+const SUSPENSION_NOTES = {
+  commission_impayee: "N'a pas payé la commission dans les délais prévus.",
+  penalite_etape_2: "N'a pas effectué le virement dans les délais prévus.",
+};
+
+const notifySellerInApp = async (sellerId, type, title, message, sale, vehicle) => {
+  try {
+    await notificationService.createSellerNotification({
+      sellerId, type, category: 'ventes', title, message,
+      metadata: {
+        saleId: sale?._id ? String(sale._id) : undefined,
+        vehicleId: vehicle?._id ? String(vehicle._id) : (sale?.vehicle ? String(sale.vehicle) : undefined)
+      }
+    });
+  } catch (error) {
+    // Une indisponibilité ponctuelle du centre de notifications ne doit jamais rejouer
+    // l'e-mail métier ni annuler une transition de vente déjà enregistrée.
+    console.error(`Notification vendeur interne impossible (${type}) : ${error.message}`);
+  }
+};
 
 const getOfferCommissionTotal = (offer) => {
   const fees = offer?.fees;
@@ -57,13 +77,33 @@ const buildWaitingList = (offers, reservePrice) => offers
     status: index === 0 ? 'gagnant' : 'en_attente',
   }));
 
+const getSellerDecisionDeadlineHours = async () => {
+  const config = await generalConfigService.getConfig();
+  const hours = Number(config?.sellerOfferDecisionDeadlineHours);
+  return Number.isFinite(hours) && hours >= 1 ? hours : 48;
+};
+
+const applySellerDecisionDeadline = async (sale) => {
+  const hours = await getSellerDecisionDeadlineHours();
+  sale.sellerDecisionDueAt = new Date(Date.now() + hours * 3600 * 1000);
+  return hours;
+};
+
+const expireSellerDecision = async (sale) => {
+  sale.status = 'sans_gagnant';
+  sale.sellerDecisionDueAt = null;
+  await sale.save();
+  await VehicleDossier.updateOne({ _id: sale.vehicle }, { $set: { session: null } });
+  return sale;
+};
+
 /**
  * Prévenir le gagnant par e-mail. Un échec d'envoi ne doit jamais faire échouer
  * l'attribution elle-même : la vente reste créée et le courriel est simplement journalisé.
  */
 const notifyWinner = async (sale, vehicle, session, deadlineHours) => {
   try {
-    const winner = await User.findById(sale.winner).select('email firstName lastName language');
+    const winner = await User.findById(sale.winner).select('email firstName lastName language role');
     if (!winner) return;
 
     const email = emailTemplates.saleWonEmail({
@@ -102,7 +142,7 @@ const notifyWaitingList = async (sale, vehicle, session) => {
   if (runnersUp.length === 0) return;
 
   const buyers = await User.find({ _id: { $in: runnersUp.map((entry) => entry.buyer) } })
-    .select('email firstName lastName language')
+    .select('email firstName lastName language role')
     .lean();
   const buyersById = new Map(buyers.map((buyer) => [String(buyer._id), buyer]));
 
@@ -134,8 +174,8 @@ const notifyWaitingList = async (sale, vehicle, session) => {
 /** Envoyer (ou reprendre) les notifications liées à une réattribution déjà enregistrée. */
 const notifyReattributedParties = async (sale, entry, vehicle, session, deadlineHours) => {
   const [candidate, seller] = await Promise.all([
-    User.findById(entry.buyer).select('email firstName lastName language').lean(),
-    User.findById(sale.seller).select('email firstName lastName language').lean(),
+    User.findById(entry.buyer).select('email firstName lastName language role').lean(),
+    User.findById(sale.seller).select('email firstName lastName language role').lean(),
   ]);
 
   if (candidate && !entry.promotionEmailSentAt) {
@@ -163,6 +203,7 @@ const notifyReattributedParties = async (sale, entry, vehicle, session, deadline
         amount: entry.amount, rank: entry.rank,
       });
       await sendEmail({ to: seller.email, subject: email.subject, text: email.text, html: email.html });
+      await notifySellerInApp(seller._id, 'sale_reattributed', 'Nouvel acheteur retenu', `Une nouvelle offre a été retenue pour votre véhicule.`, sale, vehicle);
       entry.sellerPromotionEmailSentAt = new Date();
       await sale.save();
     } catch (err) {
@@ -175,23 +216,25 @@ const notifyReattributedParties = async (sale, entry, vehicle, session, deadline
  * Prévenir le vendeur que l'enchère sur son véhicule est close et qu'une offre a été retenue.
  * Comme pour le gagnant, un échec d'envoi n'interrompt jamais l'attribution.
  */
-const notifySellerAwarded = async (sale, vehicle, session) => {
+const notifySellerAwarded = async (sale, vehicle, session, { email: sendSellerEmail = true } = {}) => {
   try {
-    const seller = await User.findById(sale.seller).select('email firstName lastName language');
+    const seller = await User.findById(sale.seller).select('email firstName lastName language role');
     if (!seller) return;
 
-    const email = emailTemplates.saleAwardedSellerEmail({
-      user: seller,
-      brand: vehicle?.brand || '',
-      model: vehicle?.model || '',
-      year: vehicle?.year || null,
-      photoUrl: coverUrl(vehicle),
-      sessionName: session.name,
-      amount: sale.amount,
-      saleId: String(sale._id),
-    });
-
-    await sendEmail({ to: seller.email, subject: email.subject, text: email.text, html: email.html });
+    if (sendSellerEmail) {
+      const email = emailTemplates.saleAwardedSellerEmail({
+        user: seller,
+        brand: vehicle?.brand || '',
+        model: vehicle?.model || '',
+        year: vehicle?.year || null,
+        photoUrl: coverUrl(vehicle),
+        sessionName: session.name,
+        amount: sale.amount,
+        saleId: String(sale._id),
+      });
+      await sendEmail({ to: seller.email, subject: email.subject, text: email.text, html: email.html });
+    }
+    await notifySellerInApp(seller._id, 'sale_awarded', 'Offre retenue', `Une offre a été retenue pour votre véhicule.`, sale, vehicle);
   } catch (error) {
     console.error(`Notification du vendeur impossible (vente ${sale._id}) : ${error.message}`);
   }
@@ -201,24 +244,37 @@ const notifySellerAwarded = async (sale, vehicle, session) => {
  * Prévenir le vendeur que son véhicule n'a pas trouvé preneur : le prix de réserve n'a pas
  * été atteint. Comme les autres notifications, un échec d'envoi n'interrompt pas l'attribution.
  */
-const notifySellerUnsold = async (sale, vehicle, session, { bestOffer, offerCount }) => {
+const notifySellerUnsold = async (sale, vehicle, session, {
+  bestOffer,
+  offerCount,
+  topOffers = [],
+  sellerDecisionDeadlineHours,
+  sellerDecisionDueAt,
+  email: sendSellerEmail = true,
+}) => {
   try {
-    const seller = await User.findById(sale.seller).select('email firstName lastName language');
+    const seller = await User.findById(sale.seller).select('email firstName lastName language role');
     if (!seller) return;
 
-    const email = emailTemplates.saleUnsoldSellerEmail({
-      user: seller,
-      brand: vehicle?.brand || '',
-      model: vehicle?.model || '',
-      year: vehicle?.year || null,
-      photoUrl: coverUrl(vehicle),
-      sessionName: session.name,
-      reservePrice: sale.reservePrice,
-      bestOffer,
-      offerCount,
-    });
-
-    await sendEmail({ to: seller.email, subject: email.subject, text: email.text, html: email.html });
+    if (sendSellerEmail) {
+      const email = emailTemplates.saleUnsoldSellerEmail({
+        user: seller,
+        brand: vehicle?.brand || '',
+        model: vehicle?.model || '',
+        year: vehicle?.year || null,
+        photoUrl: coverUrl(vehicle),
+        sessionName: session.name,
+        reservePrice: sale.reservePrice,
+        bestOffer,
+        offerCount,
+        topOffers,
+        saleId: String(sale._id),
+        sellerDecisionDeadlineHours,
+        sellerDecisionDueAt,
+      });
+      await sendEmail({ to: seller.email, subject: email.subject, text: email.text, html: email.html });
+    }
+    await notifySellerInApp(seller._id, 'sale_unsold', 'Véhicule en attente de votre décision', `La session est terminée. Consultez les offres reçues pour votre véhicule.`, sale, vehicle);
   } catch (error) {
     console.error(`Notification d'invendu impossible (vente ${sale._id}) : ${error.message}`);
   }
@@ -256,6 +312,31 @@ const startPurchaseProcedure = async (sale) => {
 };
 
 /**
+ * Offres d'un véhicule proposées au vendeur. Une offre est sélectionnable tant que le compte de
+ * l'acheteur n'est ni suspendu ni bloqué : un acheteur écarté d'une vente (délai dépassé,
+ * annulation) retrouve tous ses droits dès qu'il a réglé sa pénalité et que son compte est
+ * réactivé — y compris celui d'être choisi à nouveau sur cette même vente.
+ */
+const serializeSellerOffers = async (vehicleId, sessionId) => {
+  const offers = await Offer.find({ vehicle: vehicleId, session: sessionId, status: 'active' })
+    .populate('buyer', 'companyName firstName lastName status')
+    .sort({ amount: -1, updatedAt: 1 })
+    .lean();
+  return offers.map((offer) => ({
+    id: String(offer._id),
+    amount: offer.amount,
+    createdAt: offer.createdAt,
+    updatedAt: offer.updatedAt,
+    selectable: Boolean(offer.buyer) && !['suspendu', 'bloque'].includes(offer.buyer.status),
+    buyer: offer.buyer ? {
+      companyName: offer.buyer.companyName || '',
+      firstName: offer.buyer.firstName || '',
+      lastName: offer.buyer.lastName || '',
+    } : null,
+  }));
+};
+
+/**
  * Désigner le gagnant d'un véhicule à la clôture de sa session.
  * Retourne la vente créée, ou celle qui existait déjà (traitement rejoué).
  */
@@ -278,21 +359,41 @@ const attributeVehicle = async (vehicle, session) => {
 
   if (waitingList.length === 0) {
     // Aucune offre, ou aucune n'atteint le prix de réserve : personne ne gagne
-    sale.status = 'sans_gagnant';
+    const activeOffers = offers.filter((offer) => offer.status === 'active');
+    sale.status = activeOffers.length > 0 ? 'suspendue' : 'sans_gagnant';
     sale.currentRank = 0;
+    let sellerDecisionDeadlineHours = null;
+    if (sale.status === 'suspendue') {
+      sellerDecisionDeadlineHours = await applySellerDecisionDeadline(sale);
+    } else {
+      sale.sellerDecisionDueAt = null;
+    }
     await sale.save();
-    // Le véhicule reste validé et redevient disponible : il sera republié dans une
-    // prochaine session tant qu'il lui reste des tentatives de mise en vente.
-    // Le compteur, lui, a déjà été incrémenté à la publication dans cette session.
-    await VehicleDossier.updateOne({ _id: vehicle._id }, { $set: { session: null } });
+    // Sans aucune offre, le véhicule redevient disponible automatiquement. S'il existe
+    // des offres sous la réserve, il reste rattaché à la session clôturée et attend la
+    // décision explicite du vendeur (accepter une offre ou le remettre en vente).
+    if (activeOffers.length === 0) {
+      await VehicleDossier.updateOne({ _id: vehicle._id }, { $set: { session: null } });
+    }
 
     // La meilleure offre reçue, même sous la réserve, aide le vendeur à décider s'il
     // republie au même prix : on la lui transmet plutôt que de dire seulement « invendu ».
-    const activeOffers = offers.filter((offer) => offer.status === 'active');
     const bestOffer = activeOffers.length
       ? Math.max(...activeOffers.map((offer) => offer.amount))
       : null;
-    await notifySellerUnsold(sale, vehicle, session, { bestOffer, offerCount: activeOffers.length });
+    const topOffers = activeOffers
+      .filter((offer) => offer.amount < reservePrice)
+      .sort((a, b) => b.amount - a.amount)
+      .slice(0, 3)
+      .map((offer) => offer.amount);
+    await notifySellerUnsold(sale, vehicle, session, {
+      bestOffer,
+      offerCount: activeOffers.length,
+      topOffers,
+      sellerDecisionDeadlineHours,
+      sellerDecisionDueAt: sale.sellerDecisionDueAt,
+      email: false,
+    });
 
     return sale;
   }
@@ -303,13 +404,79 @@ const attributeVehicle = async (vehicle, session) => {
   sale.winner = best.buyer;
   sale.winningOffer = best.offer;
   sale.amount = best.amount;
+  sale.sellerDecisionDueAt = null;
   const deadlineHours = await startPurchaseProcedure(sale);
   await sale.save();
 
   await notifyWinner(sale, vehicle, session, deadlineHours);
-  await notifySellerAwarded(sale, vehicle, session);
+  await notifySellerAwarded(sale, vehicle, session, { email: false });
   await notifyWaitingList(sale, vehicle, session);
   return sale;
+};
+
+const sendSellerClosureSummaries = async ({ session, vehicles, sales }) => {
+  const vehicleIds = vehicles.map((vehicle) => vehicle._id);
+  const offers = await Offer.find({ vehicle: { $in: vehicleIds }, session: session._id, status: 'active' })
+    .select('vehicle amount')
+    .lean();
+  const offersByVehicle = new Map();
+  for (const offer of offers) {
+    const key = String(offer.vehicle);
+    const list = offersByVehicle.get(key) || [];
+    list.push(offer);
+    offersByVehicle.set(key, list);
+  }
+
+  const salesByVehicle = new Map(sales.filter(Boolean).map((sale) => [String(sale.vehicle), sale]));
+  // Un seul e-mail par vendeur, avec tous ses véhicules de la session répartis en trois sections
+  const groups = new Map();
+  const groupFor = (sellerId) => {
+    if (!groups.has(sellerId)) groups.set(sellerId, { sellerId, awarded: [], belowReserve: [], noOffers: [] });
+    return groups.get(sellerId);
+  };
+
+  for (const vehicle of vehicles) {
+    const sale = salesByVehicle.get(String(vehicle._id));
+    if (!sale) continue;
+    const vehicleOffers = offersByVehicle.get(String(vehicle._id)) || [];
+    const bestOffer = vehicleOffers.length ? Math.max(...vehicleOffers.map((offer) => offer.amount)) : null;
+    const item = {
+      vehicleLabel: [vehicle.brand, vehicle.model].filter(Boolean).join(' ') || 'Véhicule',
+      photoUrl: coverUrl(vehicle),
+      reservePrice: sale.reservePrice ?? vehicle.reservePrice ?? null,
+      bestOffer,
+      offerCount: vehicleOffers.length,
+      saleId: String(sale._id),
+    };
+    const group = groupFor(String(vehicle.seller));
+
+    if (sale.status === 'en_cours') {
+      group.awarded.push({ ...item, bestOffer: sale.amount ?? bestOffer });
+    } else if (vehicleOffers.length === 0) {
+      group.noOffers.push(item);
+    } else {
+      group.belowReserve.push(item);
+    }
+  }
+
+  const sellerDecisionDeadlineHours = await getSellerDecisionDeadlineHours();
+  for (const group of groups.values()) {
+    try {
+      const seller = await User.findById(group.sellerId).select('email firstName lastName language role').lean();
+      if (!seller?.email) continue;
+      const email = emailTemplates.saleClosureSummarySellerEmail({
+        user: seller,
+        sessionName: session.name,
+        awarded: group.awarded,
+        belowReserve: group.belowReserve,
+        noOffers: group.noOffers,
+        sellerDecisionDeadlineHours,
+      });
+      await sendEmail({ to: seller.email, subject: email.subject, text: email.text, html: email.html });
+    } catch (error) {
+      console.error(`Résumé de clôture vendeur impossible (${group.sellerId}) : ${error.message}`);
+    }
+  }
 };
 
 /**
@@ -329,6 +496,7 @@ const processSessionAttributions = async (session) => {
       console.error(`Attribution impossible pour le véhicule ${vehicle._id} : ${error.message}`);
     }
   }
+  await sendSellerClosureSummaries({ session, vehicles, sales: results });
   return results;
 };
 
@@ -389,18 +557,47 @@ const processPendingAttributionEmails = async () => {
  * confirmation intermédiaire : le nouveau gagnant est informé par e-mail que son offre est
  * retenue suite au retrait du précédent, faute pour celui-ci d'avoir respecté les règles.
  */
-const notifySellerReattributionExhausted = async (sale) => {
+const notifySellerReattributionExhausted = async (sale, suspended = false, sellerDecisionDeadlineHours = null) => {
   try {
     const [seller, vehicle] = await Promise.all([
-      User.findById(sale.seller).select('email firstName lastName language').lean(),
+      User.findById(sale.seller).select('email firstName lastName language role').lean(),
       VehicleDossier.findById(sale.vehicle).select('brand model year').lean(),
     ]);
     if (!seller?.email) return;
-    const email = emailTemplates.saleReattributionExhaustedSellerEmail({ user: seller, vehicle });
+    const email = emailTemplates.saleReattributionExhaustedSellerEmail({
+      user: seller,
+      vehicle,
+      saleId: String(sale._id),
+      suspended,
+      sellerDecisionDeadlineHours,
+    });
     await sendEmail({ to: seller.email, ...email });
+    await notifySellerInApp(seller._id, 'sale_reattribution_exhausted', suspended ? 'Véhicule suspendu' : 'Véhicule à nouveau disponible', suspended ? 'Aucun acheteur éligible ne reste. Vous pouvez choisir une offre ou remettre le véhicule en vente.' : 'Aucun acheteur éligible ne reste. Le véhicule peut être remis en session.', sale, vehicle);
   } catch (error) {
     console.error(`Notification de retour en attente impossible (vente ${sale._id}) : ${error.message}`);
   }
+};
+
+/**
+ * Les traces de paiement appartiennent au gagnant précédent. Les conserver empêcherait le
+ * nouveau gagnant de payer et pourrait permettre à une ancienne session Stripe encore en
+ * attente d'être réconciliée sur cette nouvelle attribution — y compris quand le vendeur
+ * choisit à nouveau le même acheteur, dont la première tentative avait échoué.
+ */
+const resetCommissionPayment = (sale) => {
+  sale.commissionPaidAt = null;
+  sale.documentsDelivery = null;
+  sale.transferConfirmedAt = null;
+  sale.commissionPayment = {
+    provider: 'stripe',
+    mode: null,
+    checkoutSessionId: null,
+    paymentIntentId: null,
+    status: null,
+    amount: null,
+    currency: 'eur',
+    initiatedAt: null,
+  };
 };
 
 const promoteNextBidder = async (saleId, reason = 'delai_depasse') => {
@@ -426,7 +623,7 @@ const promoteNextBidder = async (saleId, reason = 'delai_depasse') => {
 
   let next = null;
   const candidates = sale.waitingList
-    .filter((entry) => entry.rank > sale.currentRank && entry.rank <= 3 && entry.status !== 'ecarte')
+    .filter((entry) => entry.rank > sale.currentRank && entry.status !== 'ecarte')
     .sort((a, b) => a.rank - b.rank);
 
   for (const candidate of candidates) {
@@ -442,16 +639,26 @@ const promoteNextBidder = async (saleId, reason = 'delai_depasse') => {
   }
 
   if (!next) {
-    // Plus aucun candidat : le véhicule ne trouve pas preneur
-    sale.status = 'sans_gagnant';
+    const remainingOffers = await serializeSellerOffers(sale.vehicle, sale.session);
+    const hasSelectableOffer = remainingOffers.some((offer) => offer.selectable);
+    // Les offres encore exploitables restent proposées au vendeur, même sous la réserve.
+    // Si tous les offrants ont été épuisés/suspendus, le véhicule redevient disponible.
+    sale.status = hasSelectableOffer ? 'suspendue' : 'sans_gagnant';
     sale.currentRank = 0;
     sale.winner = null;
     sale.winningOffer = null;
     sale.amount = null;
+    let sellerDecisionDeadlineHours = null;
+    if (hasSelectableOffer) {
+      sellerDecisionDeadlineHours = await applySellerDecisionDeadline(sale);
+    } else {
+      sale.sellerDecisionDueAt = null;
+    }
     await sale.save();
-    // Comme à la clôture sans offre retenue, le véhicule redevient disponible
-    await VehicleDossier.updateOne({ _id: sale.vehicle }, { $set: { session: null } });
-    await notifySellerReattributionExhausted(sale);
+    if (!hasSelectableOffer) {
+      await VehicleDossier.updateOne({ _id: sale.vehicle }, { $set: { session: null } });
+    }
+    await notifySellerReattributionExhausted(sale, hasSelectableOffer, sellerDecisionDeadlineHours);
     return sale;
   }
 
@@ -460,23 +667,9 @@ const promoteNextBidder = async (saleId, reason = 'delai_depasse') => {
   sale.winner = next.buyer;
   sale.winningOffer = next.offer;
   sale.amount = next.amount;
+  sale.sellerDecisionDueAt = null;
 
-  // Les traces de paiement appartiennent au gagnant écarté. Les conserver empêcherait le
-  // nouveau gagnant de payer et pourrait permettre à une ancienne session Stripe encore en
-  // attente d'être réconciliée sur cette nouvelle attribution.
-  sale.commissionPaidAt = null;
-  sale.documentsDelivery = null;
-  sale.transferConfirmedAt = null;
-  sale.commissionPayment = {
-    provider: 'stripe',
-    mode: null,
-    checkoutSessionId: null,
-    paymentIntentId: null,
-    status: null,
-    amount: null,
-    currency: 'eur',
-    initiatedAt: null,
-  };
+  resetCommissionPayment(sale);
   const deadlineHours = await startPurchaseProcedure(sale);
   await sale.save();
 
@@ -487,6 +680,21 @@ const promoteNextBidder = async (saleId, reason = 'delai_depasse') => {
   await notifyReattributedParties(sale, next, vehicle, session, deadlineHours);
 
   return sale;
+};
+
+/**
+ * Un compte qui passe en suspendu/bloqué ne peut plus exposer de véhicule : s'il s'agit d'un
+ * vendeur (y compris un vendeur pénalisé sur un achat), ses véhicules sortent des sessions pas
+ * encore clôturées. Sans effet pour un acheteur, qui n'a aucun véhicule. Un échec ne doit pas
+ * annuler la suspension elle-même, déjà enregistrée.
+ */
+const withdrawSuspendedSellerVehicles = async (userId) => {
+  try {
+    // Chargé à l'appel : session.service charge lui-même sale.service (cycle de require).
+    await require('./session.service').withdrawSuspendedSellerVehicles(userId);
+  } catch (error) {
+    console.error(`Retrait des véhicules en session impossible (compte ${userId}) : ${error.message}`);
+  }
 };
 
 /**
@@ -783,7 +991,7 @@ const settleCommissionPayment = async (sale, { paymentIntentId, amount, currency
         .populate('vehicle', 'brand model year photos')
         .populate('session', 'name')
         .lean(),
-      User.findById(sale.seller).select('email firstName lastName language').lean(),
+      User.findById(sale.seller).select('email firstName lastName language role').lean(),
     ]);
     if (seller) {
       const vehicle = saleContext?.vehicle;
@@ -797,6 +1005,7 @@ const settleCommissionPayment = async (sale, { paymentIntentId, amount, currency
         saleId: String(sale._id),
       });
       await sendEmail({ to: seller.email, subject: email.subject, text: email.text, html: email.html });
+      await notifySellerInApp(seller._id, 'buyer_confirmed', 'Acheteur confirmé', 'Le paiement de la commission est confirmé. Vérifiez maintenant la réception du virement.', sale, vehicle);
     }
   } catch (err) {
     console.error(`Impossible d'envoyer la confirmation de l'acheteur au vendeur (vente ${sale._id}) :`, err.message);
@@ -1019,13 +1228,31 @@ const REMINDER_THRESHOLDS = [50, 80];
  */
 const notifyBuyer = async (buyerId, build) => {
   try {
-    const buyer = await User.findById(buyerId).select('email firstName lastName language');
+    const buyer = await User.findById(buyerId).select('email firstName lastName language role');
     if (!buyer) return;
     const email = build(buyer);
     await sendEmail({ to: buyer.email, subject: email.subject, text: email.text, html: email.html });
   } catch (error) {
     console.error(`Notification de l'acheteur impossible : ${error.message}`);
   }
+};
+
+const processSellerDecisionDeadlines = async () => {
+  const now = new Date();
+  const sales = await Sale.find({
+    status: 'suspendue',
+    sellerDecisionDueAt: { $ne: null, $lte: now },
+  });
+
+  for (const sale of sales) {
+    try {
+      await expireSellerDecision(sale);
+    } catch (error) {
+      console.error(`Expiration décision vendeur impossible (vente ${sale._id}) : ${error.message}`);
+    }
+  }
+
+  return sales.length;
 };
 
 /**
@@ -1035,6 +1262,8 @@ const notifyBuyer = async (buyerId, build) => {
  * Les seuils déjà notifiés sont mémorisés sur la vente, donc jamais renvoyés.
  */
 const processStepDeadlines = async () => {
+  await processSellerDecisionDeadlines();
+
   const now = new Date();
   const sales = await Sale.find({
     status: 'en_cours',
@@ -1083,8 +1312,15 @@ const processStepDeadlines = async () => {
               reason: 'commission_impayee',
             };
             buyer.status = 'suspendu';
+            buyer.suspension = {
+              note: SUSPENSION_NOTES.commission_impayee,
+              source: 'system',
+              reason: 'commission_impayee',
+              date: new Date(),
+            };
             await buyer.save();
             await revokeOngoingSalesForSuspendedBuyer(buyer._id, `${stepKey}_delai_depasse`, sale._id);
+            await withdrawSuspendedSellerVehicles(buyer._id);
             suspended = true;
           } else if (stepKey === 'virement_carte_grise') {
             // Étape 2 : le délai de virement (paiement du véhicule) est dépassé.
@@ -1096,8 +1332,15 @@ const processStepDeadlines = async () => {
               reason: 'penalite_etape_2',
             };
             buyer.status = 'suspendu';
+            buyer.suspension = {
+              note: SUSPENSION_NOTES.penalite_etape_2,
+              source: 'system',
+              reason: 'penalite_etape_2',
+              date: new Date(),
+            };
             await buyer.save();
             await revokeOngoingSalesForSuspendedBuyer(buyer._id, `${stepKey}_delai_depasse`, sale._id);
+            await withdrawSuspendedSellerVehicles(buyer._id);
             suspended = true;
           }
         }
@@ -1180,31 +1423,35 @@ const coverUrl = (vehicle) => {
 };
 
 /**
- * Nombre d'offres actives et meilleur montant proposé, par couple véhicule/session,
- * en une seule agrégation. Le vendeur suit ainsi la meilleure enchère en cours face à
+ * Nombre d'offres actives et trois meilleurs montants, par couple véhicule/session.
+ * Le vendeur suit ainsi les meilleures enchères en cours face à
  * son prix de réserve ; l'identité des enchérisseurs, elle, reste couverte par le pli
  * fermé jusqu'à la clôture.
  */
-const EMPTY_OFFER_STATS = { count: 0, bestOffer: null };
+const EMPTY_OFFER_STATS = { count: 0, bestOffer: null, topOffers: [] };
 
 const offerStatsByListing = async (vehicleIds) => {
   if (vehicleIds.length === 0) return new Map();
 
-  const rows = await Offer.aggregate([
-    { $match: { vehicle: { $in: vehicleIds }, status: 'active' } },
-    {
-      $group: {
-        _id: { vehicle: '$vehicle', session: '$session' },
-        count: { $sum: 1 },
-        bestOffer: { $max: '$amount' },
-      },
-    },
-  ]);
+  const offers = await Offer.find({ vehicle: { $in: vehicleIds }, status: 'active' })
+    .select('vehicle session amount')
+    .sort({ amount: -1, updatedAt: 1 })
+    .lean();
 
-  return new Map(rows.map((row) => [
-    `${row._id.vehicle}:${row._id.session}`,
-    { count: row.count, bestOffer: row.bestOffer ?? null },
-  ]));
+  const statsByListing = new Map();
+  for (const offer of offers) {
+    const key = `${offer.vehicle}:${offer.session}`;
+    const stats = statsByListing.get(key) || { count: 0, bestOffer: null, topOffers: [] };
+    stats.count += 1;
+    if (stats.bestOffer == null) stats.bestOffer = offer.amount;
+    // La requête est décroissante : on ne conserve que les trois meilleurs montants.
+    if (stats.topOffers.length < 3) stats.topOffers.push(offer.amount);
+    statsByListing.set(key, stats);
+  }
+
+  // L'affichage demandé est croissant parmi les trois meilleures offres.
+  for (const stats of statsByListing.values()) stats.topOffers.reverse();
+  return statsByListing;
 };
 
 /**
@@ -1227,7 +1474,7 @@ const offerStatsByListing = async (vehicleIds) => {
  */
 const SELLER_PHASES = {
   depot: ['brouillon', 'en_validation', 'a_corriger', 'refuse'],
-  en_vente: ['en_attente', 'programme', 'encheres_ouvertes'],
+  en_vente: ['en_attente', 'programme', 'encheres_ouvertes', 'offres_a_decider'],
   vente: ['vente_en_cours', 'vendu', 'vente_annulee'],
 };
 
@@ -1248,7 +1495,7 @@ const listSellerVehicles = async (sellerId) => {
       .sort({ updatedAt: -1 })
       .lean(),
     Sale.find({ seller: sellerId })
-      .select('vehicle session status amount currentStep wonAt closedAt createdAt')
+      .select('vehicle session status amount currentStep wonAt closedAt createdAt sellerDecisionDueAt')
       .sort({ createdAt: -1 })
       .lean(),
   ]);
@@ -1278,6 +1525,7 @@ const listSellerVehicles = async (sellerId) => {
     if (sale?.status === 'cloturee') state = 'vendu';
     else if (sale?.status === 'en_cours') state = 'vente_en_cours';
     else if (sale?.status === 'annulee') state = 'vente_annulee';
+    else if (sale?.status === 'suspendue') state = 'offres_a_decider';
     else if (vehicle.status === 'brouillon') state = 'brouillon';
     else if (vehicle.status === 'soumis' || vehicle.status === 'en_attente_validation') state = 'en_validation';
     else if (vehicle.status === 'correction_demandee' || vehicle.status === 'a_corriger') state = 'a_corriger';
@@ -1306,6 +1554,7 @@ const listSellerVehicles = async (sellerId) => {
       // pendant la session, où en est le marché par rapport à son prix de réserve.
       offerCount: stats.count,
       bestOffer: stats.bestOffer,
+      topOffers: stats.topOffers,
       listingCount: vehicle.listingCount ?? 0,
       updatedAt: vehicle.updatedAt,
       vehicle: {
@@ -1331,6 +1580,7 @@ const listSellerVehicles = async (sellerId) => {
         stepCount: Sale.PURCHASE_STEPS.length,
         wonAt: sale.wonAt || null,
         closedAt: sale.closedAt || null,
+        sellerDecisionDueAt: sale.sellerDecisionDueAt || null,
       } : null,
     };
   });
@@ -1377,13 +1627,16 @@ const listSellerSales = async (sellerId) => {
       const session = liveSessionsById.get(String(vehicle.session));
       const stats = statsOn(vehicle._id, vehicle.session);
       return {
-        id: `listing-${vehicle._id}`,
+        // Avant l'attribution il n'existe pas encore de Sale : le détail vendeur utilise
+        // donc l'identifiant du véhicule, reconnu par getSellerSale.
+        id: String(vehicle._id),
         status: 'en_session',
         amount: null,
         reservePrice: vehicle.reservePrice ?? null,
         offerCount: stats.count,
         // Meilleure enchère en cours, à confronter au prix de réserve ci-dessus.
         bestOffer: stats.bestOffer,
+        topOffers: stats.topOffers,
         waitingCount: 0,
         currentStep: null,
         stepKey: null,
@@ -1415,9 +1668,12 @@ const listSellerSales = async (sellerId) => {
       amount: sale.amount,
       reservePrice: sale.reservePrice ?? null,
       offerCount: vehicle ? statsOn(vehicle._id, sale.session?._id).count : 0,
+      bestOffer: vehicle ? statsOn(vehicle._id, sale.session?._id).bestOffer : null,
+      topOffers: vehicle ? statsOn(vehicle._id, sale.session?._id).topOffers : [],
       waitingCount: (sale.waitingList || []).length,
       currentStep: sale.status === 'en_cours' ? sale.currentStep : null,
       currentStepDueAt: sale.status === 'en_cours' ? (sale.currentStepDueAt || null) : null,
+      sellerDecisionDueAt: sale.status === 'suspendue' ? (sale.sellerDecisionDueAt || null) : null,
       stepKey: sale.status === 'en_cours' ? (Sale.PURCHASE_STEPS[sale.currentStep - 1] || null) : null,
       stepCount: Sale.PURCHASE_STEPS.length,
       // Vrai quand la vente est bloquée en attente d'une action du vendeur : c'est ce qui
@@ -1447,7 +1703,7 @@ const listSellerSales = async (sellerId) => {
     inSession,
     ongoing: serialized.filter((sale) => sale.status === 'en_cours'),
     closed: serialized.filter((sale) => sale.status === 'cloturee'),
-    unsold: serialized.filter((sale) => sale.status === 'sans_gagnant'),
+    unsold: serialized.filter((sale) => ['suspendue', 'sans_gagnant'].includes(sale.status)),
   };
 };
 
@@ -1457,7 +1713,7 @@ const listSellerSales = async (sellerId) => {
 const notifySellerSignedCertificate = async (sale) => {
   try {
     const [seller, populated] = await Promise.all([
-      User.findById(sale.seller).select('email firstName lastName language'),
+      User.findById(sale.seller).select('email firstName lastName language role'),
       Sale.findById(sale._id).populate('vehicle', 'brand model year photos').populate('session', 'name').lean(),
     ]);
     if (!seller) return;
@@ -1474,6 +1730,7 @@ const notifySellerSignedCertificate = async (sale) => {
     });
 
     await sendEmail({ to: seller.email, subject: email.subject, text: email.text, html: email.html });
+    await notifySellerInApp(seller._id, 'signed_certificate_ready', 'Document signé à vérifier', 'Le certificat signé est disponible et attend votre vérification.', sale, vehicle);
   } catch (error) {
     console.error(`Notification du certificat signé impossible (vente ${sale._id}) : ${error.message}`);
   }
@@ -1486,7 +1743,7 @@ const notifySellerSignedCertificate = async (sale) => {
 const notifyCertificateRejected = async (sale, { reason, comment }) => {
   try {
     const [buyer, seller, config, populated] = await Promise.all([
-      User.findById(sale.winner).select('email firstName lastName language companyName').lean(),
+      User.findById(sale.winner).select('email firstName lastName language role companyName').lean(),
       User.findById(sale.seller).select('companyName firstName lastName').lean(),
       generalConfigService.getConfig(),
       Sale.findById(sale._id).populate('vehicle', 'brand model year photos').populate('session', 'name').lean(),
@@ -1619,7 +1876,7 @@ const loadSaleContext = async (saleId) => Sale.findById(saleId)
 const notifyBuyerHandoverReady = async (sale) => {
   try {
     const [buyer, context] = await Promise.all([
-      User.findById(sale.winner).select('email firstName lastName language'),
+      User.findById(sale.winner).select('email firstName lastName language role'),
       loadSaleContext(sale._id),
     ]);
     if (!buyer) return;
@@ -1647,8 +1904,8 @@ const notifyBuyerHandoverReady = async (sale) => {
 const notifySaleClosed = async (sale) => {
   try {
     const [buyer, seller, context] = await Promise.all([
-      User.findById(sale.winner).select('email firstName lastName language'),
-      User.findById(sale.seller).select('email firstName lastName language'),
+      User.findById(sale.winner).select('email firstName lastName language role'),
+      User.findById(sale.seller).select('email firstName lastName language role'),
       loadSaleContext(sale._id),
     ]);
 
@@ -1665,8 +1922,12 @@ const notifySaleClosed = async (sale) => {
     for (const [user, role] of [[buyer, 'acheteur'], [seller, 'vendeur']]) {
       if (!user) continue;
       const email = emailTemplates.saleClosedEmail({ user, role, ...base });
-      await sendEmail({ to: user.email, subject: email.subject, text: email.text, html: email.html })
-        .catch((error) => console.error(`Notification de clôture impossible (${role}) : ${error.message}`));
+      try {
+        await sendEmail({ to: user.email, subject: email.subject, text: email.text, html: email.html });
+        if (role === 'vendeur') await notifySellerInApp(user._id, 'sale_closed', 'Vente terminée', 'La vente de votre véhicule est maintenant clôturée.', sale, vehicle);
+      } catch (error) {
+        console.error(`Notification de clôture impossible (${role}) : ${error.message}`);
+      }
     }
   } catch (error) {
     console.error(`Notification de clôture impossible (vente ${sale._id}) : ${error.message}`);
@@ -1808,25 +2069,76 @@ const getSellerSale = async (saleId, sellerId) => {
     throw err;
   }
 
-  const sale = await Sale.findOne({ _id: saleId, seller: sellerId })
+  let sale = await Sale.findOne({ _id: saleId, seller: sellerId })
     .populate('vehicle', 'brand model year mileage photos listingCount registrationNumber registrationCardAvailable')
     .populate('session', 'name endDate')
     .populate('winner', 'companyName firstName lastName email phone address')
     .lean();
 
+  // Une vente « sans gagnant » appartient à une session passée : si le véhicule a depuis été
+  // republié dans une session encore ouverte, c'est cette mise en vente qui compte. On affiche
+  // alors ses offres en direct plutôt que l'ancien résultat « véhicule de nouveau disponible ».
+  let liveVehicleId = saleId;
+  if (sale && sale.status === 'sans_gagnant' && sale.vehicle) {
+    const republished = await VehicleDossier.findOne({ _id: sale.vehicle._id, seller: sellerId, session: { $ne: null } })
+      .select('session')
+      .lean();
+    if (republished && String(republished.session) !== String(sale.session?._id)) {
+      const openSession = await Session.exists({ _id: republished.session, status: { $in: OPEN_SESSION_STATUSES } });
+      if (openSession) {
+        liveVehicleId = String(sale.vehicle._id);
+        sale = null;
+      }
+    }
+  }
+
   if (!sale) {
-    const err = new Error('Vente introuvable.');
-    err.codeName = 'sale.not_found';
-    err.statusCode = 404;
-    throw err;
+    // Pendant une session ouverte aucune vente n'existe encore : l'identifiant reçu est
+    // alors celui du véhicule. Cette vue permet tout de même au vendeur de voir les offres.
+    const vehicle = await VehicleDossier.findOne({ _id: liveVehicleId, seller: sellerId, session: { $ne: null } })
+      .populate('session', 'name endDate status')
+      .lean();
+    if (!vehicle) {
+      const err = new Error('Vente introuvable.');
+      err.codeName = 'sale.not_found';
+      err.statusCode = 404;
+      throw err;
+    }
+    const offers = await serializeSellerOffers(vehicle._id, vehicle.session._id);
+    return {
+      id: String(vehicle._id), status: 'en_session', amount: null,
+      reservePrice: vehicle.reservePrice ?? null, currentStep: 0, stepKey: null,
+      stepCount: Sale.PURCHASE_STEPS.length, steps: Sale.PURCHASE_STEPS, offers,
+      vehicle: {
+        id: String(vehicle._id), brand: vehicle.brand || '', model: vehicle.model || '',
+        year: vehicle.year ?? null, mileage: vehicle.mileage ?? null,
+        registrationNumber: vehicle.registrationNumber || null,
+        registrationCardAvailable: vehicle.registrationCardAvailable ?? true,
+        photoUrl: coverUrl(vehicle),
+      },
+      session: {
+        id: String(vehicle.session._id), name: vehicle.session.name,
+        endDate: vehicle.session.endDate, status: vehicle.session.status,
+      },
+    };
   }
 
   const vehicle = sale.vehicle;
+  const offers = sale.status === 'suspendue'
+    ? await serializeSellerOffers(vehicle._id, sale.session._id)
+    : [];
+  const unsoldReason = sale.status === 'sans_gagnant'
+    ? ((sale.waitingList || []).some((entry) => entry.status === 'ecarte' || entry.discardReason)
+      ? 'buyer_default'
+      : 'reserve_not_met')
+    : null;
   return {
     id: String(sale._id),
     status: sale.status,
+    unsoldReason,
     amount: sale.amount,
     reservePrice: sale.reservePrice ?? null,
+    sellerDecisionDueAt: sale.status === 'suspendue' ? (sale.sellerDecisionDueAt || null) : null,
     currentStep: sale.currentStep,
     stepKey: Sale.PURCHASE_STEPS[sale.currentStep - 1] || null,
     stepCount: Sale.PURCHASE_STEPS.length,
@@ -1864,6 +2176,7 @@ const getSellerSale = async (saleId, sellerId) => {
     waitingCount: (sale.waitingList || []).length,
     wonAt: sale.wonAt || null,
     closedAt: sale.closedAt || null,
+    offers,
     vehicle: vehicle ? {
       id: String(vehicle._id),
       brand: vehicle.brand || '',
@@ -1888,6 +2201,122 @@ const getSellerSale = async (saleId, sellerId) => {
       address: sale.winner.address || null,
     } : null,
   };
+};
+
+/**
+ * Prévenir l'administrateur (notification in-app et e-mail) qu'un vendeur a retenu une offre
+ * avant la clôture de la session. Un échec d'envoi n'annule jamais le choix du vendeur.
+ */
+const notifyAdminOfEarlyAcceptance = async (sale, vehicle, session, buyerId) => {
+  try {
+    const [seller, buyer, config] = await Promise.all([
+      User.findById(sale.seller).select('companyName firstName lastName').lean(),
+      User.findById(buyerId).select('companyName firstName lastName').lean(),
+      generalConfigService.getConfig(),
+    ]);
+    await notificationService.createAdminSellerEarlyAcceptanceNotification(sale, vehicle, seller, session, sale.amount);
+
+    const fullName = (user) => user?.companyName || [user?.firstName, user?.lastName].filter(Boolean).join(' ');
+    const email = emailTemplates.adminSellerEarlyAcceptanceEmail({
+      saleId: String(sale._id),
+      vehicleLabel: [vehicle.brand, vehicle.model, vehicle.year].filter(Boolean).join(' ') || 'Véhicule',
+      sellerLabel: fullName(seller) || 'Vendeur inconnu',
+      buyerLabel: fullName(buyer) || 'Acheteur inconnu',
+      sessionName: session?.name || '',
+      amount: sale.amount,
+    });
+    await sendEmail({ to: config?.adminEmail || 'contact@dealautopro.com', subject: email.subject, text: email.text, html: email.html });
+  } catch (error) {
+    console.error(`Notification admin (offre retenue avant clôture, vente ${sale._id}) impossible : ${error.message}`);
+  }
+};
+
+const acceptSellerOffer = async ({ vehicleId, offerId, sellerId }) => {
+  const vehicle = await VehicleDossier.findOne({ _id: vehicleId, seller: sellerId });
+  if (!vehicle) {
+    const err = new Error('Véhicule introuvable.');
+    err.codeName = 'sale.vehicle_not_found';
+    err.statusCode = 404;
+    throw err;
+  }
+  const offer = await Offer.findOne({ _id: offerId, vehicle: vehicle._id, status: 'active' })
+    .populate('buyer', 'status');
+  if (!offer || !offer.buyer || ['suspendu', 'bloque'].includes(offer.buyer.status)) {
+    const err = new Error("Cette offre n'est plus disponible.");
+    err.codeName = 'sale.offer_not_available';
+    err.statusCode = 409;
+    throw err;
+  }
+
+  let sale = await Sale.findOne({ vehicle: vehicle._id, session: offer.session });
+  if (sale?.status === 'suspendue' && sale.sellerDecisionDueAt && new Date(sale.sellerDecisionDueAt) <= new Date()) {
+    await expireSellerDecision(sale);
+    const err = new Error("Le délai de décision vendeur est dépassé. Le véhicule est revenu en attente de session.");
+    err.codeName = 'sale.seller_decision_expired';
+    err.statusCode = 409;
+    throw err;
+  }
+  if (sale && !['suspendue', 'sans_gagnant'].includes(sale.status)) {
+    const err = new Error('Une procédure de vente est déjà engagée pour ce véhicule.');
+    err.codeName = 'sale.already_started';
+    err.statusCode = 409;
+    throw err;
+  }
+  // Sans vente existante, la session est encore ouverte : le vendeur choisit son acheteur avant
+  // la clôture. L'offre doit alors appartenir à la session en cours du véhicule.
+  const isEarlyAcceptance = !sale;
+  if (isEarlyAcceptance) {
+    const openSession = vehicle.session && String(vehicle.session) === String(offer.session)
+      ? await Session.exists({ _id: offer.session, status: { $in: OPEN_SESSION_STATUSES } })
+      : null;
+    if (!openSession) {
+      const err = new Error("Cette offre n'est plus disponible.");
+      err.codeName = 'sale.offer_not_available';
+      err.statusCode = 409;
+      throw err;
+    }
+    sale = new Sale({ vehicle: vehicle._id, session: offer.session, seller: sellerId, reservePrice: vehicle.reservePrice || 0 });
+  }
+
+  sale.waitingList = [{ buyer: offer.buyer._id, offer: offer._id, amount: offer.amount,
+    offeredAt: offeredAt(offer), rank: 1, status: 'gagnant' }];
+  sale.status = 'en_cours';
+  sale.currentRank = 1;
+  sale.winner = offer.buyer._id;
+  sale.winningOffer = offer._id;
+  sale.amount = offer.amount;
+  sale.sellerDecisionDueAt = null;
+  // La vente peut être réutilisée après l'échec d'un précédent gagnant (liste d'attente épuisée)
+  resetCommissionPayment(sale);
+  const deadlineHours = await startPurchaseProcedure(sale);
+  await sale.save();
+
+  // Retrait immédiat de la session : plus aucune nouvelle offre ne peut être déposée.
+  vehicle.session = null;
+  await vehicle.save();
+  const session = await Session.findById(offer.session).lean();
+  await notifyWinner(sale, vehicle, session || { name: '' }, deadlineHours);
+  await notifySellerAwarded(sale, vehicle, session || { name: '' });
+  if (isEarlyAcceptance) await notifyAdminOfEarlyAcceptance(sale, vehicle, session, offer.buyer._id);
+  return sale;
+};
+
+const relistSuspendedVehicle = async ({ saleId, sellerId }) => {
+  const sale = await Sale.findOne({ _id: saleId, seller: sellerId, status: 'suspendue' });
+  if (!sale) {
+    const err = new Error("Ce véhicule n'attend pas de décision vendeur.");
+    err.codeName = 'sale.not_suspended';
+    err.statusCode = 409;
+    throw err;
+  }
+  if (sale.sellerDecisionDueAt && new Date(sale.sellerDecisionDueAt) <= new Date()) {
+    await expireSellerDecision(sale);
+    const err = new Error("Le délai de décision vendeur est dépassé. Le véhicule est déjà revenu en attente de session.");
+    err.codeName = 'sale.seller_decision_expired';
+    err.statusCode = 409;
+    throw err;
+  }
+  return expireSellerDecision(sale);
 };
 
 /**
@@ -1927,7 +2356,7 @@ const generateCertificate = async (sale) => {
 /**
  * Prévenir l'utilisateur (vendeur ou acheteur) que le document est prêt à être signé via OpenAPI
  */
-const notifySignatureReady = async (user, signatureUrl, vehicle) => {
+const notifySignatureReady = async (user, signatureUrl, vehicle, sale, isSeller = false) => {
   try {
     const email = emailTemplates.signatureReadyEmail({
       user,
@@ -1936,6 +2365,7 @@ const notifySignatureReady = async (user, signatureUrl, vehicle) => {
       signatureUrl,
     });
     await sendEmail({ to: user.email, subject: email.subject, text: email.text, html: email.html });
+    if (isSeller) await notifySellerInApp(user._id, 'signature_ready', 'Document prêt à signer', 'Votre document est prêt pour la signature électronique.', sale, vehicle);
   } catch (error) {
     console.error(`Notification de signature OpenAPI impossible pour ${user.email} : ${error.message}`);
   }
@@ -1945,8 +2375,8 @@ const notifySignatureReady = async (user, signatureUrl, vehicle) => {
 const notifyPostSignatureAction = async (sale, sellerStampApplied) => {
   try {
     const [seller, buyer, vehicle, session] = await Promise.all([
-      User.findById(sale.seller).select('email firstName lastName language').lean(),
-      User.findById(sale.winner).select('email firstName lastName language').lean(),
+      User.findById(sale.seller).select('email firstName lastName language role').lean(),
+      User.findById(sale.winner).select('email firstName lastName language role').lean(),
       VehicleDossier.findById(sale.vehicle).select('brand model').lean(),
       Session.findById(sale.session).select('name').lean(),
     ]);
@@ -1963,6 +2393,7 @@ const notifyPostSignatureAction = async (sale, sellerStampApplied) => {
     } else if (!sellerStampApplied && seller) {
       const email = emailTemplates.sellerStampRequiredEmail({ user: seller, ...common });
       await sendEmail({ to: seller.email, subject: email.subject, text: email.text, html: email.html });
+      await notifySellerInApp(seller._id, 'seller_stamp_required', 'Tampon vendeur requis', 'Le document signé est prêt. Ajoutez votre tampon pour poursuivre la vente.', sale, vehicle);
     }
   } catch (error) {
     // La signature et le changement d'étape restent acquis même si le service mail est indisponible.
@@ -2145,10 +2576,10 @@ const processRegistrationCard = async ({ saleId, sellerId, formulaNumber, regist
 
     // Notifier le vendeur et l'acheteur
     if (sellerSigner && sellerSigner.url) {
-      await notifySignatureReady(generatedCert.seller, sellerSigner.url, generatedCert.vehicle);
+      await notifySignatureReady(generatedCert.seller, sellerSigner.url, generatedCert.vehicle, sale, true);
     }
     if (buyerSigner && buyerSigner.url) {
-      await notifySignatureReady(generatedCert.buyer, buyerSigner.url, generatedCert.vehicle);
+      await notifySignatureReady(generatedCert.buyer, buyerSigner.url, generatedCert.vehicle, sale, false);
     }
 
   } catch (error) {
@@ -2412,11 +2843,18 @@ const cancelSaleByBuyer = async ({ saleId, buyerId }) => {
     reason: 'commission_impayee',
   };
   buyer.status = 'suspendu';
+  buyer.suspension = {
+    note: SUSPENSION_NOTES.commission_impayee,
+    source: 'system',
+    reason: 'commission_impayee',
+    date: new Date(),
+  };
   await buyer.save();
 
   // On passe la vente courante et toutes les autres ventes en cours à l'étape 1 ou 2 au candidat suivant
   await promoteNextBidder(sale._id, 'annulation_volontaire');
   await revokeOngoingSalesForSuspendedBuyer(buyer._id, 'annulation_volontaire');
+  await withdrawSuspendedSellerVehicles(buyer._id);
 
   return sale;
 };
@@ -2509,6 +2947,8 @@ const toggleSaleTimer = async (saleId, pause) => {
   return sale;
 };
 
+const FORCE_END_SUSPENSION_NOTE = "Suspendu lors de la fin forcée d'une vente par l'administration.";
+
 const forceEndSale = async (saleId, suspendBuyer, suspendSeller, promoteNext) => {
   if (!mongoose.isValidObjectId(saleId)) {
     const err = new Error('Vente introuvable.');
@@ -2526,8 +2966,11 @@ const forceEndSale = async (saleId, suspendBuyer, suspendSeller, promoteNext) =>
     const buyer = await User.findById(sale.winner);
     if (buyer) {
       buyer.status = 'suspendu';
+      // Renseigne l'historique de suspension du compte (voir user.model.js)
+      buyer.suspension = { source: 'admin', reason: 'admin', note: FORCE_END_SUSPENSION_NOTE, date: new Date() };
       await buyer.save();
       await revokeOngoingSalesForSuspendedBuyer(buyer._id, 'suspension_admin');
+      await withdrawSuspendedSellerVehicles(buyer._id);
     }
   }
 
@@ -2535,7 +2978,9 @@ const forceEndSale = async (saleId, suspendBuyer, suspendSeller, promoteNext) =>
     const seller = await User.findById(sale.seller);
     if (seller) {
       seller.status = 'suspendu';
+      seller.suspension = { source: 'admin', reason: 'admin', note: FORCE_END_SUSPENSION_NOTE, date: new Date() };
       await seller.save();
+      await withdrawSuspendedSellerVehicles(seller._id);
     }
   }
 
@@ -2640,6 +3085,30 @@ const finalizeSignature = async (saleId, signatureId) => {
   }
 };
 
+/**
+ * Rattrape les signatures électroniques terminées dont le webhook OpenAPI n'est jamais arrivé.
+ * Sans ce filet, l'étape 3 ne pouvait avancer que par le webhook : s'il se perd, ou s'il ne peut
+ * pas joindre le serveur (APP_BASE_URL en localhost pendant le développement), la vente restait
+ * bloquée alors que les deux parties avaient signé. Même principe que
+ * reconcilePendingCommissionPayments pour les paiements.
+ */
+const reconcilePendingSignatures = async () => {
+  const sales = await Sale.find({
+    status: 'en_cours',
+    currentStep: 3,
+    'esignature.operationId': { $nin: [null, ''] },
+  }).select('_id esignature.operationId').lean();
+
+  for (const sale of sales) {
+    try {
+      const state = await fetchSignatureState(sale.esignature.operationId);
+      if (state === 'DONE') await finalizeSignature(sale._id, sale.esignature.operationId);
+    } catch (error) {
+      console.error(`Vérification de la signature impossible (vente ${sale._id}) : ${error.message}`);
+    }
+  }
+};
+
 module.exports = {
   validateSellerCertificate,
   rejectSellerCertificate,
@@ -2660,6 +3129,8 @@ module.exports = {
   listSellerSales,
   listSellerVehicles,
   getSellerSale,
+  acceptSellerOffer,
+  relistSuspendedVehicle,
   confirmTransferReceived,
   processRegistrationCard,
   submitSellerCertificate,
@@ -2672,5 +3143,7 @@ module.exports = {
   forceEndSale,
   extendCurrentStepDeadline,
   revokeOngoingSalesForSuspendedBuyer,
+  withdrawSuspendedSellerVehicles,
   finalizeSignature,
+  reconcilePendingSignatures,
 };

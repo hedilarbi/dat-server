@@ -42,8 +42,11 @@ const protect = async (req, res, next) => {
       // spécifiquement les étapes 1-2 si le compte est suspendu.
       const isSaleRoute = fullPath.includes('/sales');
       const isVehicleDossierRoute = fullPath.includes('/vehicle-dossiers') && req.method === 'GET';
+      // Les notifications signalent surtout les étapes des ventes/achats en cours, que le compte
+      // suspendu a le droit de terminer : les lui couper le laisserait sans ces alertes.
+      const isNotificationRoute = fullPath.includes('/notifications');
 
-      if (!isAuthOrCommission && !isSupportTicket && !isSaleRoute && !isVehicleDossierRoute) {
+      if (!isAuthOrCommission && !isSupportTicket && !isSaleRoute && !isVehicleDossierRoute && !isNotificationRoute) {
         return res.status(403).json({ error: 'auth.account_suspended', message: 'Votre compte est suspendu. Seuls le règlement de votre commission, vos ventes en cours et le support sont autorisés.' });
       }
     }

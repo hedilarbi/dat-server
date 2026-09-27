@@ -98,14 +98,18 @@ router.get('/current-sales', attachUserIfAuthenticated, async (req, res) => {
         ])
       : [0, [], []];
 
+    // Seule une offre de la session EN COURS du véhicule compte. Une offre reste « active »
+    // après la clôture de sa session : sans ce filtre, un véhicule republié dans une nouvelle
+    // session affichait « Offre déposée » (et le montant) d'une ancienne offre. Même règle que
+    // `myOffer` sur la fiche véhicule.
     const activeOffers = req.user && dossiers.length
       ? await Offer.find({
           buyer: req.user._id,
-          vehicle: { $in: dossiers.map((dossier) => dossier._id) },
           status: 'active',
-        }).select('vehicle').lean()
+          $or: dossiers.map((dossier) => ({ vehicle: dossier._id, session: dossier.session })),
+        }).select('vehicle amount').lean()
       : [];
-    const offeredVehicleIds = new Set(activeOffers.map((offer) => String(offer.vehicle)));
+    const offerAmountByVehicleId = new Map(activeOffers.map((offer) => [String(offer.vehicle), offer.amount]));
     const sessionsById = new Map(sessions.map((session) => [String(session._id), session]));
     const vehicles = dossiers.map((dossier) => {
       const session = sessionsById.get(String(dossier.session));
@@ -113,7 +117,8 @@ router.get('/current-sales', attachUserIfAuthenticated, async (req, res) => {
 
       return {
         id: String(dossier._id),
-        hasActiveOffer: offeredVehicleIds.has(String(dossier._id)),
+        hasActiveOffer: offerAmountByVehicleId.has(String(dossier._id)),
+        offerAmount: offerAmountByVehicleId.get(String(dossier._id)) ?? null,
         brand: dossier.brand || '',
         model: dossier.model || '',
         year: dossier.year ?? null,
@@ -173,7 +178,7 @@ router.get('/vehicles/:id', attachUserIfAuthenticated, async (req, res) => {
         'firstRegistrationDate', 'vehicleGenre', 'fiscalPower', 'bodyType', 'gearbox',
         'passengerCount', 'doorCount', 'color', 'vrade', 'procedure', 'registrationCardAvailable',
         'identificationSheetAvailable', 'description', 'conditionDetails', 'listingCount',
-        'photos', 'session', 'lotNumber',
+        'photos', 'session', 'lotNumber', 'seller',
       ].join(' '))
       .lean();
 
@@ -207,7 +212,7 @@ router.get('/vehicles/:id', attachUserIfAuthenticated, async (req, res) => {
 
     // Offre déjà déposée par l'acheteur connecté sur ce véhicule dans cette session :
     // la fiche propose alors de la modifier, jamais d'en déposer une seconde.
-    const myOffer = req.user?.role === 'acheteur'
+    const myOffer = ['acheteur', 'vendeur'].includes(req.user?.role)
       ? await Offer.findOne({
           vehicle: dossier._id,
           session: session._id,
@@ -219,6 +224,7 @@ router.get('/vehicles/:id', attachUserIfAuthenticated, async (req, res) => {
     res.json({
       vehicle: {
         id: String(dossier._id),
+        isOwnVehicle: Boolean(req.user && String(dossier.seller) === String(req.user._id)),
         brand: dossier.brand || '',
         model: dossier.model || '',
         year: dossier.year ?? null,

@@ -161,5 +161,23 @@ const fetchAuditTrail = async (signatureId) => {
   return Buffer.from(response.data);
 };
 
+/**
+ * État courant d'une signature côté OpenAPI (WAIT_VALIDATION, WAIT_SIGN, DONE, ERROR).
+ * Sert à rattraper une signature terminée dont le webhook n'est jamais arrivé.
+ */
+const fetchSignatureState = async (signatureId) => {
+  const token = process.env.ESIGNATURE_TOKEN;
+  if (!token) throw new Error('ESIGNATURE_TOKEN manquant dans les variables d\'environnement');
+
+  const esignatureBaseUrl = requiredUrl('ESIGNATURE_BASE_URL');
+  const response = await axios.get(`${esignatureBaseUrl}/signatures/${signatureId}/detail`, {
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+  });
+  // Selon les endpoints, l'API renvoie l'objet directement ou l'enveloppe dans { data }.
+  const detail = response.data?.data ?? response.data;
+  return detail?.state || null;
+};
+
+module.exports.fetchSignatureState = fetchSignatureState;
 module.exports.fetchSignedDocument = fetchSignedDocument;
 module.exports.fetchAuditTrail = fetchAuditTrail;

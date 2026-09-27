@@ -14,6 +14,48 @@ const getAdminNotifications = async () => {
   return { notifications, unreadCount };
 };
 
+const getSellerNotifications = async (sellerId) => {
+  const scope = { recipientRole: 'vendeur', recipientUser: sellerId };
+  const [notifications, unreadCount] = await Promise.all([
+    Notification.find(scope).sort({ createdAt: -1 }).limit(50),
+    Notification.countDocuments({ ...scope, readAt: null })
+  ]);
+  return { notifications, unreadCount };
+};
+
+const createSellerNotification = async ({ sellerId, type, category = 'autre', title, message, metadata = {} }) =>
+  Notification.create({
+    recipientRole: 'vendeur',
+    recipientUser: sellerId,
+    type,
+    category,
+    title,
+    message,
+    metadata
+  });
+
+const markSellerNotificationAsRead = async (notificationId, sellerId) => {
+  const notification = await Notification.findOneAndUpdate(
+    { _id: notificationId, recipientRole: 'vendeur', recipientUser: sellerId },
+    { $set: { readAt: new Date() } },
+    { new: true }
+  );
+  if (!notification) {
+    const err = new Error('Notification introuvable.');
+    err.codeName = 'notification.not_found';
+    throw err;
+  }
+  return notification;
+};
+
+const markAllSellerNotificationsAsRead = async (sellerId) => {
+  await Notification.updateMany(
+    { recipientRole: 'vendeur', recipientUser: sellerId, readAt: null },
+    { $set: { readAt: new Date() } }
+  );
+  return { message: 'Notifications marquées comme lues.' };
+};
+
 const createAdminRegistrationNotification = async (user) => {
   const roleLabel = user.role === 'vendeur' ? 'vendeur' : 'acheteur';
 
@@ -48,6 +90,31 @@ const createAdminVehicleDossierNotification = async (dossier, seller) => {
       sellerId: seller._id.toString(),
       companyName: seller.companyName,
       vehicleLabel
+    }
+  });
+};
+
+const createAdminVehicleDossierChangedNotification = async (dossier, seller, action) => {
+  const vehicleLabel = [dossier.brand, dossier.model].filter(Boolean).join(' ') || 'Véhicule';
+  const sellerLabel = seller?.companyName || [seller?.firstName, seller?.lastName].filter(Boolean).join(' ') || 'Un vendeur';
+  const deleted = action === 'deleted';
+
+  return Notification.create({
+    recipientRole: 'admin',
+    type: deleted ? 'vehicle_dossier_deleted_by_seller' : 'vehicle_dossier_updated_by_seller',
+    category: 'dossier_vehicule',
+    title: deleted ? 'Dossier véhicule supprimé par le vendeur' : 'Dossier véhicule modifié par le vendeur',
+    message: deleted
+      ? `${sellerLabel} a supprimé le dossier véhicule ${vehicleLabel}.`
+      : `${sellerLabel} a modifié le dossier véhicule ${vehicleLabel}. Il est de nouveau en attente de validation.`,
+    createdByUser: seller?._id,
+    metadata: {
+      dossierId: deleted ? null : dossier._id.toString(),
+      deletedDossierId: deleted ? dossier._id.toString() : null,
+      sellerId: seller?._id ? seller._id.toString() : String(dossier.seller),
+      companyName: seller?.companyName || null,
+      vehicleLabel,
+      action
     }
   });
 };
@@ -138,6 +205,32 @@ const createAdminLatePaymentNotification = async (sale, vehicle, buyer) => {
   });
 };
 
+/**
+ * Un vendeur a choisi une offre avant la clôture de la session : le véhicule est retiré de la
+ * session en cours et la procédure de vente démarre aussitôt, sans attendre la clôture.
+ */
+const createAdminSellerEarlyAcceptanceNotification = async (sale, vehicle, seller, session, amount) => {
+  const vehicleLabel = [vehicle.brand, vehicle.model].filter(Boolean).join(' ') || 'Véhicule';
+  const sellerLabel = seller?.companyName || [seller?.firstName, seller?.lastName].filter(Boolean).join(' ') || 'Un vendeur';
+
+  return Notification.create({
+    recipientRole: 'admin',
+    type: 'seller_offer_accepted_early',
+    category: 'ventes',
+    title: 'Offre retenue avant la clôture de la session',
+    message: `${sellerLabel} a retenu une offre de ${amount} € sur ${vehicleLabel} avant la clôture de ${session?.name || 'la session'}. Le véhicule est retiré de la session et la procédure de vente est lancée.`,
+    createdByUser: seller?._id,
+    metadata: {
+      saleId: sale._id.toString(),
+      vehicleId: vehicle._id.toString(),
+      sellerId: seller?._id ? seller._id.toString() : null,
+      sessionId: session?._id ? session._id.toString() : null,
+      vehicleLabel,
+      amount
+    }
+  });
+};
+
 const createAdminCertificateRejectedNotification = async (sale, vehicle, buyer, seller) => {
   const vehicleLabel = [vehicle.brand, vehicle.model].filter(Boolean).join(' ') || 'Véhicule';
 
@@ -158,11 +251,17 @@ const createAdminCertificateRejectedNotification = async (sale, vehicle, buyer, 
 
 module.exports = {
   getAdminNotifications,
+  getSellerNotifications,
+  createSellerNotification,
+  markSellerNotificationAsRead,
+  markAllSellerNotificationsAsRead,
   createAdminRegistrationNotification,
   createAdminVehicleDossierNotification,
+  createAdminVehicleDossierChangedNotification,
   createAdminVehicleMaxAttemptsNotification,
   createAdminTicketNotification,
   createAdminLatePaymentNotification,
+  createAdminSellerEarlyAcceptanceNotification,
   createAdminCertificateRejectedNotification,
   markNotificationAsRead,
   markAllAdminNotificationsAsRead

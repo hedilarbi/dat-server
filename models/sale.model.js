@@ -79,7 +79,7 @@ const saleSchema = new mongoose.Schema({
 
   status: {
     type: String,
-    enum: ['en_cours', 'cloturee', 'sans_gagnant', 'annulee'],
+    enum: ['en_cours', 'suspendue', 'cloturee', 'sans_gagnant', 'annulee'],
     default: 'en_cours'
   },
   // Position dans PURCHASE_STEPS (1 = paiement de la commission)
@@ -91,6 +91,9 @@ const saleSchema = new mongoose.Schema({
   // Seuils de rappel déjà envoyés pour l'étape en cours (en % du délai écoulé),
   // remis à zéro à chaque changement d'étape pour ne jamais relancer deux fois.
   stepRemindersSent: { type: [Number], default: [] },
+  // Échéance laissée au vendeur quand une vente est suspendue avec des offres sous le prix
+  // de réserve. Après cette date, le véhicule est remis en attente de session.
+  sellerDecisionDueAt: { type: Date, default: null },
   
   // Pause du chronomètre par l'admin
   timerPaused: { type: Boolean, default: false },

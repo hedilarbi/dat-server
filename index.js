@@ -15,6 +15,7 @@ const app = express();
 
 const sessionService = require('./services/session.service');
 const saleService = require('./services/sale.service');
+const { scheduleDraftUserCleanup } = require('./services/draftUserCleanup.service');
 
 // Synchroniser les sessions puis désigner les gagnants des sessions qui viennent de clôturer
 const syncSessionsAndAttributions = async () => {
@@ -24,6 +25,8 @@ const syncSessionsAndAttributions = async () => {
   await saleService.processPendingAttributionEmails();
   // Rattrape les commissions encaissées dont le retour navigateur n'est jamais arrivé
   await saleService.reconcilePendingCommissionPayments();
+  // Rattrape les signatures terminées dont le webhook OpenAPI n'est jamais arrivé (étape 3)
+  await saleService.reconcilePendingSignatures();
   // Rappels à 50 % et 80 % du délai, puis retrait de l'attribution à l'expiration
   await saleService.processStepDeadlines();
 };
@@ -44,6 +47,10 @@ connectDB().then(() => {
 
   // Seeding des taxes par défaut (TAV 20 %)
   seedTaxes();
+
+  // Chaque jour à 03:00, supprimer uniquement les inscriptions abandonnées dont
+  // l'e-mail n'a jamais été validé. Les brouillons vérifiés sont conservés.
+  scheduleDraftUserCleanup();
 
   // Initialiser et synchroniser automatiquement les sessions (ouvertes/clôturées)
   syncSessionsAndAttributions().catch((err) => {
@@ -98,6 +105,7 @@ const path = require('path');
 app.use('/api/auth', require('./routes/auth.routes'));
 app.use('/api/tickets', require('./routes/ticket.routes'));
 app.use('/api/admin', require('./routes/admin.routes'));
+app.use('/api/notifications', require('./routes/notification.routes'));
 app.use('/api/admin/messages', require('./routes/message.routes'));
 app.use('/api/admin/commissions', require('./routes/commission.routes'));
 app.use('/api/admin/general-config', require('./routes/generalConfig.routes'));

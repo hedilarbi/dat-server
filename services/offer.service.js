@@ -101,11 +101,15 @@ const quoteOffer = async ({ vehicleId, amount }) => {
  * Les frais sont recalculés côté serveur : le devis affiché n'est jamais pris pour argent comptant.
  */
 const createOffer = async ({ vehicleId, amount, buyer }) => {
-  if (!buyer || buyer.role !== 'acheteur') {
-    throw offerError('Seuls les acheteurs peuvent déposer une offre.', 'offer.forbidden_role', 403);
+  if (!buyer || !['acheteur', 'vendeur'].includes(buyer.role)) {
+    throw offerError('Ce compte ne peut pas déposer une offre.', 'offer.forbidden_role', 403);
   }
   if (buyer.status !== 'valide') {
-    throw offerError('Votre compte acheteur doit être validé pour déposer une offre.', 'offer.buyer_not_validated', 403);
+    throw offerError('Votre compte professionnel doit être validé pour déposer une offre.', 'offer.buyer_not_validated', 403);
+  }
+
+  if (await VehicleDossier.exists({ _id: vehicleId, seller: buyer._id })) {
+    throw offerError('Vous ne pouvez pas déposer une offre sur votre propre véhicule.', 'offer.own_vehicle', 403);
   }
 
   const quote = await quoteOffer({ vehicleId, amount });

@@ -20,6 +20,15 @@ const listVehicleSales = async (req, res, next) => {
   }
 };
 
+const listVehicleOffers = async (req, res, next) => {
+  try {
+    const result = await adminVehicleSalesService.adminListVehicleOffers(req.params.id);
+    res.status(200).json({ success: true, ...result });
+  } catch (error) {
+    next(error);
+  }
+};
+
 const listDossiers = async (req, res, next) => {
   try {
     const { status, columnFilters, page, limit } = req.query;
@@ -52,6 +61,15 @@ const updateDossierMedia = async (req, res, next) => {
   try {
     const dossier = await vehicleDossierService.adminUpdateDossierMedia(req.params.id, req.body);
     res.status(200).json({ success: true, dossier });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const deleteDossier = async (req, res, next) => {
+  try {
+    await vehicleDossierService.adminDeleteDossier(req.params.id);
+    res.status(200).json({ success: true, message: 'Dossier véhicule supprimé.' });
   } catch (error) {
     next(error);
   }
@@ -100,10 +118,12 @@ module.exports = {
   getDossierById,
   updateDossier,
   updateDossierMedia,
+  deleteDossier,
   approveDossier,
   rejectDossier,
   requestCorrection,
   getAvailableDossiers,
   listVehicleSales,
+  listVehicleOffers,
   listMaxedOutVehicles
 };

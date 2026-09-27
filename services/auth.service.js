@@ -66,12 +66,16 @@ const normalizePendingCommission = async (user) => {
  * Service pour l'étape 1 de l'inscription
  */
 const registerStep1 = async (userData) => {
-  const { email, password, firstName, lastName, companyName, activityType, phone, role } = userData;
+  const { password, firstName, lastName, companyName, activityType, phone, role } = userData;
+  const email = userData.email.trim().toLowerCase();
   const language = normalizeLanguage(userData.language);
 
-  // 1. Vérifier l'unicité de l'e-mail, de la raison sociale et du téléphone
+  // Un brouillon dont l'adresse n'a pas encore été validée peut être repris depuis
+  // l'étape 1. On conserve le même document afin de ne pas bloquer l'utilisateur avec
+  // ses propres contraintes uniques (e-mail, société et téléphone).
   const userExists = await User.findOne({ email });
-  if (userExists) {
+  const resumableDraft = userExists?.status === 'brouillon' && !userExists.emailVerified;
+  if (userExists && !resumableDraft) {
     const err = new Error('Cet e-mail est déjà utilisé par un autre compte.');
     err.codeName = 'auth.email_already_exists';
     throw err;
@@ -79,7 +83,10 @@ const registerStep1 = async (userData) => {
 
   if (companyName) {
     const escapedCompany = companyName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const companyExists = await User.findOne({ companyName: new RegExp(`^${escapedCompany}$`, 'i') });
+    const companyExists = await User.findOne({
+      companyName: new RegExp(`^${escapedCompany}$`, 'i'),
+      ...(resumableDraft ? { _id: { $ne: userExists._id } } : {})
+    });
     if (companyExists) {
       const err = new Error('Cette raison sociale (nom d’entreprise) est déjà enregistrée par un autre compte.');
       err.codeName = 'auth.company_name_already_exists';
@@ -88,7 +95,10 @@ const registerStep1 = async (userData) => {
   }
 
   if (phone) {
-    const phoneExists = await User.findOne({ phone: phone.trim() });
+    const phoneExists = await User.findOne({
+      phone: phone.trim(),
+      ...(resumableDraft ? { _id: { $ne: userExists._id } } : {})
+    });
     if (phoneExists) {
       const err = new Error('Ce numéro de téléphone est déjà utilisé par un autre compte.');
       err.codeName = 'auth.phone_already_exists';
@@ -100,23 +110,22 @@ const registerStep1 = async (userData) => {
   const otpCode = generateOTP();
   const otpExpires = new Date(Date.now() + 15 * 60 * 1000);
 
-  // 3. Créer l'utilisateur en statut brouillon
-  const user = new User({
+  // 3. Créer le brouillon ou remplacer ses informations avec la nouvelle saisie.
+  // L'affectation du mot de passe déclenche à nouveau son hachage par le middleware du modèle.
+  const user = resumableDraft ? userExists : new User();
+  Object.assign(user, {
     email,
     password,
     firstName,
     lastName,
     companyName,
     activityType,
-    phone,
+    phone: phone.trim(),
     role: role || 'acheteur',
     language,
     status: 'brouillon',
     emailVerified: false,
-    otp: {
-      code: otpCode,
-      expiresAt: otpExpires
-    }
+    otp: { code: otpCode, expiresAt: otpExpires }
   });
 
   await user.save();
@@ -362,6 +371,129 @@ const registerStep2 = async (userId, profileData) => {
   const userObj = user.toObject();
   delete userObj.password;
 
+  return userObj;
+};
+
+/**
+ * Mettre à jour son profil une fois le compte validé (ou suspendu) : mêmes champs et mêmes
+ * contrôles qu'à l'étape 2 de l'inscription, mais sans repasser le compte par la validation
+ * admin — contrairement à registerStep2, le statut n'est jamais touché ici. Réservé aux
+ * comptes déjà instruits : un compte encore en brouillon ou en correction utilise
+ * registerStep2, qui les fait ressoumettre pour validation.
+ */
+const updateProfile = async (userId, profileData) => {
+  const user = await User.findById(userId);
+  if (!user) {
+    const err = new Error('Utilisateur introuvable.');
+    err.codeName = 'auth.user_not_found';
+    throw err;
+  }
+
+  if (!['valide', 'suspendu'].includes(user.status)) {
+    const err = new Error("Votre dossier doit d'abord être validé pour modifier votre profil ici.");
+    err.codeName = 'auth.profile_not_editable';
+    err.statusCode = 403;
+    throw err;
+  }
+
+  const { firstName, lastName, companyName, activityType, phone, address, siret, kbisUrl, cinRectoUrl, cinVersoUrl, vhuNumber, bankInfo } = profileData;
+
+  if (!address || !address.street || !address.city || !address.country || !address.postalCode) {
+    const err = new Error('L\'adresse complète est obligatoire.');
+    err.codeName = 'auth.address_missing';
+    throw err;
+  }
+
+  if (!siret) {
+    const err = new Error('Le numéro SIRET est obligatoire.');
+    err.codeName = 'auth.siret_missing';
+    throw err;
+  }
+
+  const cleanSiret = siret.replace(/\s/g, '');
+  if (!SIRET_REGEX.test(cleanSiret)) {
+    const err = new Error('Le numéro SIRET doit contenir exactement 14 chiffres.');
+    err.codeName = 'auth.siret_invalid';
+    throw err;
+  }
+
+  const existingSiret = await User.findOne({ siret: cleanSiret, _id: { $ne: user._id } });
+  if (existingSiret) {
+    const err = new Error('Ce numéro SIRET est déjà enregistré par un autre compte.');
+    err.codeName = 'auth.siret_already_exists';
+    throw err;
+  }
+
+  if (companyName && companyName.trim() !== user.companyName) {
+    const escapedCompany = companyName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const companyExists = await User.findOne({
+      companyName: new RegExp(`^${escapedCompany}$`, 'i'),
+      _id: { $ne: user._id }
+    });
+    if (companyExists) {
+      const err = new Error('Cette raison sociale (nom d’entreprise) est déjà enregistrée par un autre compte.');
+      err.codeName = 'auth.company_name_already_exists';
+      throw err;
+    }
+  }
+
+  if (phone && phone.trim() !== user.phone) {
+    const phoneExists = await User.findOne({ phone: phone.trim(), _id: { $ne: user._id } });
+    if (phoneExists) {
+      const err = new Error('Ce numéro de téléphone est déjà utilisé par un autre compte.');
+      err.codeName = 'auth.phone_already_exists';
+      throw err;
+    }
+  }
+
+  if (phone && !isValidPhoneNumber(phone)) {
+    const err = new Error('Le format du numéro de téléphone est invalide.');
+    err.codeName = 'auth.phone_invalid';
+    throw err;
+  }
+
+  if (!kbisUrl || !cinRectoUrl || !cinVersoUrl) {
+    const err = new Error('Le document K-bis et la carte d\'identité (recto/verso) sont obligatoires.');
+    err.codeName = 'auth.documents_missing';
+    throw err;
+  }
+
+  if (user.role === 'vendeur') {
+    if (!bankInfo || !bankInfo.bankName || !bankInfo.accountHolder || !bankInfo.iban || !bankInfo.bic) {
+      const err = new Error('Les coordonnées bancaires complètes sont obligatoires pour un vendeur.');
+      err.codeName = 'auth.bank_info_missing';
+      throw err;
+    }
+
+    user.bankInfo = {
+      bankName: bankInfo.bankName,
+      accountHolder: bankInfo.accountHolder,
+      iban: bankInfo.iban,
+      bic: bankInfo.bic,
+      // Un compte déjà validé a nécessairement déjà un RIB : ne jamais l'effacer si absent du payload
+      ribUrl: bankInfo.ribUrl || user.bankInfo?.ribUrl
+    };
+
+    if (vhuNumber) user.vhuNumber = vhuNumber;
+  }
+
+  if (firstName) user.firstName = firstName;
+  if (lastName) user.lastName = lastName;
+  if (companyName) user.companyName = companyName;
+  if (activityType) user.activityType = activityType;
+  if (phone) user.phone = phone;
+
+  user.address = address;
+  user.siret = cleanSiret;
+  user.kbisUrl = kbisUrl;
+  user.cinRectoUrl = cinRectoUrl;
+  user.cinVersoUrl = cinVersoUrl;
+  // Le statut (valide/suspendu) et le tampon (endpoint dédié) restent inchangés ici.
+
+  await user.save();
+
+  const userObj = user.toObject();
+  delete userObj.password;
   return userObj;
 };
 
@@ -654,6 +786,7 @@ const confirmPendingCommissionPayment = async (userId, checkoutSessionId, paymen
   user.pendingCommission = undefined;
   if (user.status === 'suspendu') {
     user.status = 'valide';
+    user.suspension = undefined;
   }
   await user.save();
 
@@ -673,6 +806,7 @@ module.exports = {
   resetPassword,
   updateLanguage,
   updateStamp,
+  updateProfile,
   normalizePendingCommission,
   startPendingCommissionPayment,
   startPendingCommissionIntent,

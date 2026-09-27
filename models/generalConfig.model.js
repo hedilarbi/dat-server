@@ -24,6 +24,13 @@ const generalConfigSchema = new mongoose.Schema({
     default: 3,
     min: 1,
   },
+  // Délai laissé au vendeur pour accepter une offre sous réserve ou remettre le véhicule
+  // en vente. Passé ce délai, le véhicule revient automatiquement en attente de session.
+  sellerOfferDecisionDeadlineHours: {
+    type: Number,
+    default: 48,
+    min: 1,
+  },
   // Pénalité de réactivation réservée au dépassement du délai de virement (étape 2).
   accountReactivationFee: {
     type: Number,

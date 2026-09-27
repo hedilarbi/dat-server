@@ -130,6 +130,32 @@ const getSellerSale = async (req, res, next) => {
   }
 };
 
+const acceptSellerOffer = async (req, res, next) => {
+  try {
+    const sale = await saleService.acceptSellerOffer({
+      vehicleId: req.params.vehicleId,
+      offerId: req.params.offerId,
+      sellerId: req.user._id,
+    });
+    res.status(200).json({
+      success: true,
+      message: "Offre acceptée. La procédure d'achat a commencé.",
+      sale: await saleService.getSellerSale(sale._id, req.user._id),
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const relistSuspendedVehicle = async (req, res, next) => {
+  try {
+    const sale = await saleService.relistSuspendedVehicle({ saleId: req.params.id, sellerId: req.user._id });
+    res.status(200).json({ success: true, message: 'Le véhicule est de nouveau disponible pour une session.', sale });
+  } catch (error) {
+    next(error);
+  }
+};
+
 const confirmTransferReceived = async (req, res, next) => {
   try {
     const sale = await saleService.confirmTransferReceived({
@@ -278,6 +304,8 @@ module.exports = {
   rejectSellerCertificate,
   listSellerSales,
   getSellerSale,
+  acceptSellerOffer,
+  relistSuspendedVehicle,
   confirmTransferReceived,
   processRegistrationCard,
   validateSignedCertificate,

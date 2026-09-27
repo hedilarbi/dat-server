@@ -231,6 +231,28 @@ const logout = async (req, res, next) => {
 };
 
 /**
+ * Mettre à jour son profil (compte déjà validé/suspendu) : n'affecte pas le statut du compte.
+ */
+const updateProfile = async (req, res, next) => {
+  try {
+    const { firstName, lastName, companyName, activityType, phone, address, siret, kbisUrl, cinRectoUrl, cinVersoUrl, vhuNumber, bankInfo } = req.body;
+
+    const user = await authService.updateProfile(req.user._id, {
+      firstName, lastName, companyName, activityType, phone, address, siret,
+      kbisUrl, cinRectoUrl, cinVersoUrl, vhuNumber, bankInfo,
+    });
+
+    res.status(200).json({
+      success: true,
+      message: 'Profil mis à jour.',
+      user,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
  * Obtenir l'utilisateur connecté actuel (Me)
  */
 const getMe = async (req, res, next) => {
@@ -345,6 +367,7 @@ module.exports = {
   resendOtp,
   verifyOtp,
   registerStep2,
+  updateProfile,
   login,
   forgotPassword,
   resetPassword,

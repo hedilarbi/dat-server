@@ -1,12 +1,19 @@
 const Session = require('../models/session.model');
 const SessionConfig = require('../models/sessionConfig.model');
 const User = require('../models/user.model');
+const VehicleDossier = require('../models/vehicleDossier.model');
+const Offer = require('../models/offer.model');
 const commissionService = require('./commission.service');
 const generalConfigService = require('./generalConfig.service');
 const notificationService = require('./notification.service');
 const { nextLotNumber } = require('../models/counter.model');
 const { sendEmail } = require('../config/mail');
 const { adminVehicleMaxAttemptsEmail } = require('./emailTemplates.service');
+
+// Comptes qui ne peuvent plus exposer de véhicule en session.
+const SUSPENDED_ACCOUNT_STATUSES = ['suspendu', 'bloque'];
+// Sessions pas encore clôturées : programmées ou ouvertes aux offres.
+const NOT_CLOSED_SESSION_STATUSES = ['upcoming', 'programmee', 'open', 'active'];
 
 /**
  * Récupère ou initialise la configuration des sessions (Lundi, Mercredi, Vendredi, 48h)
@@ -197,6 +204,17 @@ const notifyAdminOfMaxAttempts = async (vehicle, listingCount, adminEmail) => {
  * — le véhicule réclame alors une décision commerciale (baisse du prix, retrait...).
  */
 const assignVehicleToSession = async (vehicle, sessionId) => {
+  // Un vendeur suspendu ou bloqué ne peut plus exposer de véhicule : ses dossiers restent
+  // visibles côté admin (avec le libellé « Compte vendeur suspendu ») mais ne rentrent dans
+  // aucune session tant que le compte n'est pas réactivé.
+  const seller = await User.findById(vehicle.seller).select('status').lean();
+  if (seller && SUSPENDED_ACCOUNT_STATUSES.includes(seller.status)) {
+    const err = new Error('Compte vendeur suspendu : ce véhicule ne peut pas être ajouté à une session.');
+    err.codeName = 'session.seller_suspended';
+    err.statusCode = 409;
+    throw err;
+  }
+
   const sessionKey = String(sessionId);
   const isNewListing = String(vehicle.lastListedSession || '') !== sessionKey;
 
@@ -220,6 +238,35 @@ const assignVehicleToSession = async (vehicle, sessionId) => {
   }
 
   return vehicle;
+};
+
+/**
+ * Retirer des sessions pas encore clôturées (programmées ou ouvertes) tous les véhicules d'un
+ * vendeur qui vient d'être suspendu ou bloqué. Les offres déjà reçues sur ces véhicules sont
+ * annulées : sans cela, les acheteurs les verraient toujours « en cours » dans Mes offres alors
+ * que le véhicule n'est plus exposé. Les sessions déjà clôturées ne sont pas touchées : leurs
+ * ventes font partie des ventes en cours, que le vendeur suspendu a le droit de terminer.
+ * Retourne le nombre de véhicules retirés.
+ */
+const withdrawSuspendedSellerVehicles = async (sellerId) => {
+  if (!sellerId) return 0;
+  const liveSessionIds = await Session.find({ status: { $in: NOT_CLOSED_SESSION_STATUSES } }).distinct('_id');
+  if (liveSessionIds.length === 0) return 0;
+
+  const vehicles = await VehicleDossier.find({ seller: sellerId, session: { $in: liveSessionIds } })
+    .select('_id session')
+    .lean();
+  if (vehicles.length === 0) return 0;
+
+  await Offer.updateMany(
+    { status: 'active', $or: vehicles.map((vehicle) => ({ vehicle: vehicle._id, session: vehicle.session })) },
+    { $set: { status: 'annulee', cancelledAt: new Date() } },
+  );
+  await VehicleDossier.updateMany(
+    { _id: { $in: vehicles.map((vehicle) => vehicle._id) } },
+    { $set: { session: null } },
+  );
+  return vehicles.length;
 };
 
 /**
@@ -265,7 +312,7 @@ const closeSessionNow = async (sessionId) => {
     session,
     total: results.length,
     winners: results.filter((sale) => sale.status === 'en_cours').length,
-    withoutWinner: results.filter((sale) => sale.status === 'sans_gagnant').length,
+    withoutWinner: results.filter((sale) => ['suspendue', 'sans_gagnant'].includes(sale.status)).length,
   };
 };
 
@@ -361,6 +408,7 @@ module.exports = {
   syncSessionStatuses,
   autoGenerateAndSyncSessions,
   assignVehicleToSession,
+  withdrawSuspendedSellerVehicles,
   closeSessionNow,
   createManualSession,
   updateSession,

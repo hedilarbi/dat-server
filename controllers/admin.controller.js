@@ -49,10 +49,19 @@ const requestCorrection = async (req, res, next) => {
 const updateStatus = async (req, res, next) => {
   try {
     const userId = req.params.id;
-    const { status } = req.body;
+    const { status, suspensionNote } = req.body;
 
-    const user = await adminService.updateUserStatus(userId, status);
+    const user = await adminService.updateUserStatus(userId, status, { suspensionNote });
     res.status(200).json({ success: true, message: `Statut utilisateur mis à jour : ${status}.`, user });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const getUserSuspensionHistory = async (req, res, next) => {
+  try {
+    const history = await adminService.getUserSuspensionHistory(req.params.id);
+    res.status(200).json({ success: true, ...history });
   } catch (error) {
     next(error);
   }
@@ -101,6 +110,7 @@ const getSale = async (req, res, next) => {
       return res.status(404).json({ success: false, message: 'Vente introuvable.' });
     }
     const Sale = require('../models/sale.model');
+    const Offer = require('../models/offer.model');
     // Le dossier véhicule est renvoyé en entier : la fiche s'ouvre dans une modale, sans
     // second appel. Les pièces jointes lourdes (photos, documents) en font partie.
     const sale = await Sale.findById(req.params.id)
@@ -115,10 +125,18 @@ const getSale = async (req, res, next) => {
       return res.status(404).json({ success: false, message: 'Vente introuvable.' });
     }
 
+    const offers = sale.session
+      ? await Offer.find({ vehicle: sale.vehicle._id, session: sale.session._id || sale.session })
+          .populate('buyer', 'firstName lastName companyName email phone role status')
+          .sort({ amount: -1, updatedAt: 1 })
+          .lean()
+      : [];
+
     res.status(200).json({
       success: true,
       data: {
         ...sale,
+        offers,
         // L'ordre des étapes vient du modèle : l'interface ne doit pas le redéclarer.
         steps: Sale.PURCHASE_STEPS,
         stepCount: Sale.PURCHASE_STEPS.length,
@@ -193,6 +211,7 @@ module.exports = {
   rejectUser,
   requestCorrection,
   updateStatus,
+  getUserSuspensionHistory,
   getNotifications,
   markNotificationAsRead,
   markAllNotificationsAsRead,

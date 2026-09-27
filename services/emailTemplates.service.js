@@ -32,6 +32,17 @@ const CORRECTION_PATHS = {
   }
 };
 
+const SUPPORT_PATHS = {
+  fr: {
+    acheteur: '/fr/acheteur/tableau-de-bord/support',
+    vendeur: '/fr/vendeur/tableau-de-bord/support',
+  },
+  en: {
+    acheteur: '/en/buyer/dashboard/support',
+    vendeur: '/en/seller/dashboard/support',
+  },
+};
+
 const getUserRole = (role) => role === 'vendeur' ? 'vendeur' : 'acheteur';
 
 const getRoleLoginUrl = (user, nextPath) => {
@@ -442,8 +453,14 @@ const dossierCorrectionEmail = ({ user, vehicleLabel, reasonsText, reasonsPlain,
 };
 
 // Slug de la page de détail d'une vente gagnée, par langue (miroir de client/app/routing.ts)
-const WON_SALE_PATH = { fr: '/fr/acheteur/tableau-de-bord/mes-vehicules', en: '/en/buyer/dashboard/my-vehicles' };
+const WON_SALE_PATHS = {
+  acheteur: { fr: '/fr/acheteur/tableau-de-bord/mes-vehicules', en: '/en/buyer/dashboard/my-vehicles' },
+  vendeur: { fr: '/fr/vendeur/mes-achats', en: '/en/seller/my-purchases' },
+};
+// Un vendeur qui achète suit ses achats dans son propre espace, pas dans celui des acheteurs
+const wonSalePath = (user, lang) => (WON_SALE_PATHS[user?.role] || WON_SALE_PATHS.acheteur)[lang];
 const SELLER_SALES_PATH = { fr: '/fr/vendeur/ventes', en: '/en/seller/sales' };
+const SELLER_EN_VENTE_PATH = { fr: '/fr/vendeur/en-vente', en: '/en/seller/for-sale' };
 
 /**
  * Exprime un délai en heures sous une forme lisible : « 48 heures (2 jours) ».
@@ -477,7 +494,7 @@ const vehicleCard = (photoUrl, title, subtitle) => `
 const saleWonEmail = ({ user, brand, model, year, photoUrl, sessionName, amount, saleId, deadlineHours }) => {
   const lang = normalizeLanguage(user.language);
   const locale = lang === 'fr' ? 'fr-FR' : 'en-GB';
-  const url = `${CLIENT_BASE_URL}${WON_SALE_PATH[lang]}/${saleId}`;
+  const url = `${CLIENT_BASE_URL}${wonSalePath(user, lang)}/${saleId}`;
   const price = Number(amount).toLocaleString(locale);
   const vehicleLabel = [brand, model].filter(Boolean).join(' ') || (lang === 'fr' ? 'Véhicule' : 'Vehicle');
   const delay = formatDeadline(deadlineHours, lang);
@@ -565,7 +582,7 @@ const formatRemaining = (milliseconds, lang) => {
  */
 const saleStepReminderEmail = ({ user, brand, model, year, photoUrl, sessionName, stepKey, saleId, remainingMs }) => {
   const lang = normalizeLanguage(user.language);
-  const url = `${CLIENT_BASE_URL}${WON_SALE_PATH[lang]}/${saleId}`;
+  const url = `${CLIENT_BASE_URL}${wonSalePath(user, lang)}/${saleId}`;
   const vehicleLabel = [brand, model].filter(Boolean).join(' ') || (lang === 'fr' ? 'Véhicule' : 'Vehicle');
   const stepLabel = STEP_LABELS[lang][stepKey] || stepKey;
   const remaining = formatRemaining(remainingMs, lang);
@@ -678,6 +695,37 @@ const adminVehicleMaxAttemptsEmail = ({ dossierId, vehicleLabel, registrationNum
   };
 };
 
+/** Alerte admin : un vendeur a retenu une offre avant la clôture de la session. */
+const adminSellerEarlyAcceptanceEmail = ({ saleId, vehicleLabel, sellerLabel, sessionName, amount, buyerLabel }) => {
+  const adminBaseUrl = process.env.ADMIN_BASE_URL || process.env.ADMIN_URL || 'http://localhost:3002';
+  const url = `${adminBaseUrl.replace(/\/$/, '')}/ventes/${saleId}`;
+  const price = Number(amount).toLocaleString('fr-FR');
+
+  return {
+    subject: `Offre retenue avant clôture : ${vehicleLabel} - DealAutoPro`,
+    text: `${sellerLabel} a retenu l'offre de ${price} € (${buyerLabel}) sur ${vehicleLabel} avant la clôture de ${sessionName}. Le véhicule est retiré de la session et la procédure de vente est lancée. Consultez la vente : ${url}`,
+    html: layout({
+      heading: 'Offre retenue avant la clôture',
+      footer: 'Système de supervision DealAutoPro',
+      body: `
+        <p style="color: #1A2230; font-size: 16px;">Bonjour,</p>
+        <p style="color: #5A5E66; font-size: 14px;">Un vendeur a choisi une offre sans attendre la fin de la session.</p>
+        <div style="background-color: #FFF7F1; border-left: 4px solid #D9704F; padding: 15px; margin: 20px 0;">
+          <p style="margin: 0 0 10px 0;"><strong>Véhicule :</strong> ${vehicleLabel}</p>
+          <p style="margin: 0 0 10px 0;"><strong>Vendeur :</strong> ${sellerLabel}</p>
+          <p style="margin: 0 0 10px 0;"><strong>Session :</strong> ${sessionName}</p>
+          <p style="margin: 0 0 10px 0;"><strong>Acheteur retenu :</strong> ${buyerLabel}</p>
+          <p style="margin: 0; color: #B04A2C; font-weight: bold;">Offre retenue : ${price} €</p>
+        </div>
+        <p style="color: #5A5E66; font-size: 14px;">Le véhicule est retiré de la session en cours et la procédure de vente est lancée.</p>
+        <div style="text-align: center; margin: 30px 0;">
+          <a href="${url}" style="background-color: #D9704F; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold;">Voir la vente</a>
+        </div>
+      `
+    })
+  };
+};
+
 /**
  * Information envoyée à l'acheteur écarté : le délai de l'étape est dépassé,
  * le véhicule passe au candidat suivant de la liste d'attente.
@@ -755,24 +803,83 @@ const saleWinnerRemovedEmail = ({ user, brand, model, year, photoUrl, sessionNam
  * qui lui permet de décider s'il republie au même prix de réserve ou plus bas. Sans aucune
  * offre, le message le dit franchement plutôt que d'afficher un montant vide.
  */
-const saleReattributionExhaustedSellerEmail = ({ user, vehicle }) => {
+const saleReattributionExhaustedSellerEmail = ({ user, vehicle, saleId, suspended = false, sellerDecisionDeadlineHours }) => {
   const fr = normalizeLanguage(user.language) === 'fr';
+  const lang = fr ? 'fr' : 'en';
   const label = [vehicle?.brand, vehicle?.model].filter(Boolean).join(' ') || (fr ? 'Votre véhicule' : 'Your vehicle');
-  const subject = fr ? `${label} : retour en attente de session - DealAutoPro` : `${label}: awaiting another session - DealAutoPro`;
-  const message = fr
-    ? `Les acheteurs éligibles pour ${label} n'ont pas finalisé la vente. Votre véhicule est de nouveau en attente de session. Nous vous informerons de la suite.`
-    : `The eligible buyers for ${label} did not complete the sale. Your vehicle is awaiting another session. We will keep you informed.`;
-  return { subject, text: message, html: layout({ heading: subject, body: `<p>${message}</p>`, footer: 'DealAutoPro' }) };
+  const url = saleId ? `${CLIENT_BASE_URL}${SELLER_SALES_PATH[lang]}/${saleId}` : `${CLIENT_BASE_URL}${SELLER_EN_VENTE_PATH[lang]}`;
+  const subject = suspended
+    ? (fr ? `${label} : offres sous réserve à décider - DealAutoPro` : `${label}: below-reserve offers to review - DealAutoPro`)
+    : (fr ? `${label} : retour en attente de session - DealAutoPro` : `${label}: awaiting another session - DealAutoPro`);
+  const copy = suspended
+    ? (fr ? {
+      heading: 'Décision requise sur les offres sous réserve',
+      line1: `Le dernier meilleur offrant au-dessus du prix de réserve pour ${label} a perdu le véhicule, car il n’a pas finalisé les étapes dans les délais.`,
+      line2: 'Il n’y a donc plus de meilleur offrant au-dessus du prix de réserve.',
+      line3: `Il reste en revanche des offres en dessous du prix de réserve. Vous avez ${sellerDecisionDeadlineHours || 48} heure(s) pour choisir l’une de ces offres ou remettre le véhicule en programmation de session.`,
+      cta: 'Choisir une offre ou reprogrammer',
+      text: `Le dernier meilleur offrant au-dessus du prix de réserve pour ${label} a perdu le véhicule. Il reste des offres sous réserve : vous avez ${sellerDecisionDeadlineHours || 48} heure(s) pour choisir une offre ou remettre le véhicule en programmation. ${url}`,
+    } : {
+      heading: 'Decision required on below-reserve offers',
+      line1: `The last bidder above the reserve price for ${label} lost the vehicle because they did not complete the required steps on time.`,
+      line2: 'There is no longer any bidder above the reserve price.',
+      line3: `There are still offers below the reserve price. You have ${sellerDecisionDeadlineHours || 48} hour(s) to choose one of these offers or relist the vehicle in a future session.`,
+      cta: 'Choose an offer or relist',
+      text: `The last bidder above the reserve price for ${label} lost the vehicle. There are still below-reserve offers: you have ${sellerDecisionDeadlineHours || 48} hour(s) to choose an offer or relist the vehicle. ${url}`,
+    })
+    : (fr ? {
+      heading: 'Retour en attente de session',
+      line1: `Tous les acheteurs pour ${label} ont été épuisés.`,
+      line2: 'Aucune offre exploitable ne reste disponible.',
+      line3: 'Votre véhicule est de nouveau disponible pour une prochaine session.',
+      cta: 'Voir mes véhicules',
+      text: `Tous les acheteurs pour ${label} ont été épuisés. Votre véhicule est disponible pour une prochaine session. ${url}`,
+    } : {
+      heading: 'Awaiting another session',
+      line1: `All buyers for ${label} have been exhausted.`,
+      line2: 'No usable offer remains available.',
+      line3: 'Your vehicle is available for another session.',
+      cta: 'View my vehicles',
+      text: `All buyers for ${label} have been exhausted. Your vehicle is available for another session. ${url}`,
+    });
+  return {
+    subject,
+    text: copy.text,
+    html: layout({
+      heading: copy.heading,
+      footer: 'DealAutoPro',
+      body: `
+        <p style="color:#5A5E66;font-size:14px;">${copy.line1}</p>
+        <p style="color:#13243C;font-size:15px;font-weight:bold;">${copy.line2}</p>
+        <p style="color:#5A5E66;font-size:14px;">${copy.line3}</p>
+        <div style="text-align:center;margin:30px 0;">
+          <a href="${url}" style="background-color:#13243C;color:white;padding:12px 25px;text-decoration:none;border-radius:5px;font-weight:bold;">${copy.cta}</a>
+        </div>
+      `,
+    }),
+  };
 };
 
-const saleUnsoldSellerEmail = ({ user, brand, model, year, photoUrl, sessionName, reservePrice, bestOffer, offerCount }) => {
+const saleUnsoldSellerEmail = ({ user, brand, model, year, photoUrl, sessionName, reservePrice, bestOffer, offerCount, topOffers = [], saleId, sellerDecisionDeadlineHours }) => {
   const lang = normalizeLanguage(user.language);
   const locale = lang === 'fr' ? 'fr-FR' : 'en-GB';
-  const url = `${CLIENT_BASE_URL}${SELLER_SALES_PATH[lang]}`;
+  const url = saleId ? `${CLIENT_BASE_URL}${SELLER_SALES_PATH[lang]}/${saleId}` : `${CLIENT_BASE_URL}${SELLER_SALES_PATH[lang]}`;
   const vehicleLabel = [brand, model].filter(Boolean).join(' ') || (lang === 'fr' ? 'Véhicule' : 'Vehicle');
   const hasOffers = Number(offerCount) > 0 && Number.isFinite(Number(bestOffer));
   const best = hasOffers ? Number(bestOffer).toLocaleString(locale) : null;
   const reserve = Number.isFinite(Number(reservePrice)) ? Number(reservePrice).toLocaleString(locale) : null;
+  const formattedTopOffers = (topOffers || [])
+    .filter((amount) => Number.isFinite(Number(amount)))
+    .slice(0, 3)
+    .map((amount) => Number(amount).toLocaleString(locale));
+  const topOffersHtml = formattedTopOffers.length
+    ? `<div style="margin: 18px 0; padding: 16px; border: 1px solid #F0C9BD; border-radius: 8px; background: #FFF7F1;">
+        <div style="color: #B04A2C; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; font-weight: bold;">${lang === 'fr' ? '3 meilleures offres sous réserve' : 'Top 3 bids below reserve'}</div>
+        <div style="margin-top: 10px; display: block;">
+          ${formattedTopOffers.map((amount, index) => `<span style="display: inline-block; margin: 4px 6px 4px 0; padding: 8px 12px; border-radius: 999px; background: #FDECE4; color: #B04A2C; font-weight: bold;">#${index + 1} · ${lang === 'fr' ? `${amount} €` : `€${amount}`}</span>`).join('')}
+        </div>
+      </div>`
+    : '';
 
   const copy = {
     fr: {
@@ -787,11 +894,13 @@ const saleUnsoldSellerEmail = ({ user, brand, model, year, photoUrl, sessionName
       offersValue: hasOffers ? `${best} €` : 'Aucune offre',
       reserveLabel: 'Votre prix de réserve',
       line2: hasOffers
-        ? 'Les offres reçues sont restées sous votre prix de réserve. Vous pouvez republier le véhicule dans une prochaine session, en ajustant si besoin ce prix.'
+        ? 'Les offres reçues sont restées sous votre prix de réserve. Si vous souhaitez accepter l’une de ces offres, vous pouvez le faire depuis votre espace vendeur.'
         : 'Aucune offre n\'a été déposée pendant cette session. Vous pouvez republier le véhicule dans une prochaine session.',
-      line3: 'Votre véhicule est de nouveau disponible : contactez-nous pour le replacer en vente.',
-      cta: 'Suivre mes ventes',
-      text: `L'enchère sur ${vehicleLabel} est clôturée (${sessionName}) sans atteindre le prix de réserve${reserve ? ` de ${reserve} €` : ''}. ${hasOffers ? `Meilleure offre reçue : ${best} €.` : 'Aucune offre reçue.'} ${url}`,
+      line3: hasOffers
+        ? `Votre véhicule reste suspendu : vous avez ${sellerDecisionDeadlineHours || 48} heure(s) pour choisir un acheteur ou remettre le véhicule en vente. Passé ce délai, le véhicule reviendra automatiquement en attente de session.`
+        : 'Votre véhicule est de nouveau disponible pour une prochaine session.',
+      cta: hasOffers ? 'Choisir une offre' : 'Suivre mes ventes',
+      text: `L'enchère sur ${vehicleLabel} est clôturée (${sessionName}) sans atteindre le prix de réserve${reserve ? ` de ${reserve} €` : ''}. ${hasOffers ? `Meilleure offre reçue : ${best} €. Top offres : ${formattedTopOffers.map((amount) => `${amount} €`).join(', ')}. Vous pouvez accepter une offre depuis votre espace vendeur.` : 'Aucune offre reçue.'} ${url}`,
       footer: "L'équipe DealAutoPro"
     },
     en: {
@@ -806,11 +915,13 @@ const saleUnsoldSellerEmail = ({ user, brand, model, year, photoUrl, sessionName
       offersValue: hasOffers ? `€${best}` : 'No bid',
       reserveLabel: 'Your reserve price',
       line2: hasOffers
-        ? 'The bids received stayed below your reserve price. You can relist the vehicle in a future session, adjusting that price if needed.'
+        ? 'The bids received stayed below your reserve price. If you want to accept one of these bids, you can do it from your seller workspace.'
         : 'No bid was placed during this session. You can relist the vehicle in a future session.',
-      line3: 'Your vehicle is available again: contact us to put it back up for sale.',
-      cta: 'Track my sales',
-      text: `The auction on ${vehicleLabel} closed (${sessionName}) without meeting the reserve price${reserve ? ` of €${reserve}` : ''}. ${hasOffers ? `Highest bid received: €${best}.` : 'No bid received.'} ${url}`,
+      line3: hasOffers
+        ? `Your vehicle remains suspended: you have ${sellerDecisionDeadlineHours || 48} hour(s) to choose a buyer or relist it. After that, the vehicle will automatically return to awaiting session.`
+        : 'Your vehicle is available again for a future session.',
+      cta: hasOffers ? 'Choose a bid' : 'Track my sales',
+      text: `The auction on ${vehicleLabel} closed (${sessionName}) without meeting the reserve price${reserve ? ` of €${reserve}` : ''}. ${hasOffers ? `Highest bid received: €${best}. Top bids: ${formattedTopOffers.map((amount) => `€${amount}`).join(', ')}. You can accept a bid from your seller workspace.` : 'No bid received.'} ${url}`,
       footer: 'The DealAutoPro team'
     }
   }[lang];
@@ -830,6 +941,7 @@ const saleUnsoldSellerEmail = ({ user, brand, model, year, photoUrl, sessionName
           <div style="color: #13243C; font-size: 26px; font-weight: bold; margin-top: 6px;">${copy.offersValue}</div>
           ${reserve ? `<div style="color: #5A5E66; font-size: 12px; margin-top: 10px;">${copy.reserveLabel} : <strong style="color: #13243C;">${reserve} €</strong></div>` : ''}
         </div>
+        ${topOffersHtml}
         <p style="color: #5A5E66; font-size: 14px;">${copy.line2}</p>
         <p style="color: #5A5E66; font-size: 14px;">${copy.line3}</p>
         <div style="text-align: center; margin: 30px 0;">
@@ -855,10 +967,10 @@ const saleAwardedSellerEmail = ({ user, brand, model, year, photoUrl, sessionNam
       subtitle: [year ? `Année ${year}` : null, sessionName].filter(Boolean).join(' · '),
       line1: `La session ${sessionName} est clôturée et votre véhicule a un meilleur offrant.`,
       offerLabel: 'Meilleure offre',
-      line2: 'Entre la vérification de l\'acheteur et la réception de son virement, prévoyez un délai pouvant aller jusqu\'à 5 jours.',
+      line2: 'Un virement sera prévu dans les 5 jours qui suivent.',
       line3: 'Vous pouvez suivre la vente et confirmer la réception du virement directement depuis votre espace vendeur.',
       cta: 'Suivre et confirmer le virement',
-      text: `La session ${sessionName} est clôturée et votre ${vehicleLabel} a un meilleur offrant de ${price} €. Entre la vérification de l'acheteur et la réception de son virement, prévoyez jusqu'à 5 jours. Suivez la vente et confirmez la réception du virement ici : ${url}`,
+      text: `La session ${sessionName} est clôturée et votre ${vehicleLabel} a un meilleur offrant de ${price} €. Un virement sera prévu dans les 5 jours qui suivent. Suivez la vente et confirmez la réception du virement ici : ${url}`,
       footer: "L'équipe DealAutoPro"
     },
     en: {
@@ -868,10 +980,10 @@ const saleAwardedSellerEmail = ({ user, brand, model, year, photoUrl, sessionNam
       subtitle: [year ? `Year ${year}` : null, sessionName].filter(Boolean).join(' · '),
       line1: `The ${sessionName} session has closed and your vehicle has a highest bidder.`,
       offerLabel: 'Highest bid',
-      line2: 'Please allow up to 5 days between buyer verification and receipt of their bank transfer.',
+      line2: 'A bank transfer will be made within the following 5 days.',
       line3: 'You can track the sale and confirm receipt of the transfer directly from your seller workspace.',
       cta: 'Track and confirm transfer',
-      text: `The ${sessionName} session has closed and your ${vehicleLabel} has a highest bid of €${price}. Please allow up to 5 days between buyer verification and receipt of the transfer. Track the sale and confirm receipt here: ${url}`,
+      text: `The ${sessionName} session has closed and your ${vehicleLabel} has a highest bid of €${price}. A bank transfer will be made within the following 5 days. Track the sale and confirm receipt here: ${url}`,
       footer: 'The DealAutoPro team'
     }
   }[lang];
@@ -897,6 +1009,116 @@ const saleAwardedSellerEmail = ({ user, brand, model, year, photoUrl, sessionNam
         </div>
       `
     })
+  };
+};
+
+/**
+ * E-mail unique de clôture de session envoyé au vendeur : il regroupe tous ses véhicules de
+ * la session en trois sections — meilleur offrant au-dessus du prix de réserve, offres sous
+ * le prix de réserve (avec un bouton pour décider) et véhicules sans offre (reprogrammés).
+ */
+const saleClosureSummarySellerEmail = ({ user, sessionName, awarded = [], belowReserve = [], noOffers = [], sellerDecisionDeadlineHours }) => {
+  const lang = normalizeLanguage(user.language);
+  const locale = lang === 'fr' ? 'fr-FR' : 'en-GB';
+  const salesUrl = `${CLIENT_BASE_URL}${SELLER_SALES_PATH[lang]}`;
+  const vehiclesUrl = `${CLIENT_BASE_URL}${SELLER_EN_VENTE_PATH[lang]}`;
+  const formatAmount = (amount) => {
+    if (!Number.isFinite(Number(amount))) return '—';
+    const value = Number(amount).toLocaleString(locale);
+    return lang === 'fr' ? `${value} €` : `€${value}`;
+  };
+  const deadlineHours = sellerDecisionDeadlineHours || 48;
+
+  const copy = {
+    fr: {
+      subject: `${sessionName} : récapitulatif de clôture de vos véhicules - DealAutoPro`,
+      heading: 'Récapitulatif de clôture',
+      hello: `Bonjour ${user.firstName || ''} ${user.lastName || ''},`.replace(/\s+,/, ','),
+      intro: `La session ${sessionName} est clôturée. Voici le résultat de vos véhicules.`,
+      vehicle: 'Véhicule',
+      reserve: 'Prix de réserve',
+      best: 'Meilleure offre',
+      offers: 'Offres',
+      awardedTitle: 'Meilleur offrant au-dessus du prix de réserve',
+      awardedNote: 'Un virement sera prévu dans les 5 jours qui suivent.',
+      awardedCta: 'Suivre mes ventes',
+      belowTitle: 'Offrant sous le prix de réserve',
+      belowNote: `Ces véhicules ont un offrant, mais son offre n’atteint pas le prix de réserve. Vous avez ${deadlineHours} heure(s) pour choisir une offre ou remettre le véhicule en vente. Passé ce délai, le véhicule reviendra automatiquement en attente de session.`,
+      belowCta: 'Décider maintenant',
+      noneTitle: 'Sans aucune offre',
+      noneNote: 'Ces véhicules n’ont reçu aucune offre : ils seront reprogrammés automatiquement pour une prochaine session.',
+      noneCta: 'Voir mes véhicules',
+      footer: "L'équipe DealAutoPro",
+    },
+    en: {
+      subject: `${sessionName}: closing summary of your vehicles - DealAutoPro`,
+      heading: 'Closing summary',
+      hello: `Hello ${user.firstName || ''} ${user.lastName || ''},`.replace(/\s+,/, ','),
+      intro: `${sessionName} has closed. Here is the outcome for your vehicles.`,
+      vehicle: 'Vehicle',
+      reserve: 'Reserve price',
+      best: 'Best offer',
+      offers: 'Offers',
+      awardedTitle: 'Highest bidder above the reserve price',
+      awardedNote: 'A bank transfer will be made within the following 5 days.',
+      awardedCta: 'Track my sales',
+      belowTitle: 'Bidder below the reserve price',
+      belowNote: `These vehicles have a bidder, but the offer does not reach the reserve price. You have ${deadlineHours} hour(s) to choose an offer or relist the vehicle. After that, the vehicle will automatically return to awaiting session.`,
+      belowCta: 'Decide now',
+      noneTitle: 'No offers at all',
+      noneNote: 'These vehicles received no offers: they will be automatically rescheduled for an upcoming session.',
+      noneCta: 'View my vehicles',
+      footer: 'The DealAutoPro team',
+    },
+  }[lang];
+
+  const th = (label) => `<th align="left" style="padding:10px;color:#4C5058;font-size:11px;text-transform:uppercase;">${label}</th>`;
+  const section = ({ title, note, color, items, cta, url, withOffers = true, perItemLink = false }) => {
+    if (!items.length) return { html: '', text: '' };
+    const rows = items.map((item) => `
+      <tr>
+        <td style="padding:10px;border-bottom:1px solid #ECEADF;width:72px;">${item.photoUrl ? `<img src="${item.photoUrl}" alt="" width="72" height="54" style="display:block;width:72px;height:54px;object-fit:cover;border-radius:6px;" />` : ''}</td>
+        <td style="padding:10px;border-bottom:1px solid #ECEADF;color:#13243C;font-weight:bold;">${item.vehicleLabel}</td>
+        <td style="padding:10px;border-bottom:1px solid #ECEADF;color:#5A5E66;">${formatAmount(item.reservePrice)}</td>
+        ${withOffers ? `<td style="padding:10px;border-bottom:1px solid #ECEADF;color:#D9704F;font-weight:bold;">${item.bestOffer != null ? formatAmount(item.bestOffer) : '—'}</td>
+        <td style="padding:10px;border-bottom:1px solid #ECEADF;color:#5A5E66;">${item.offerCount ?? 0}</td>` : ''}
+        ${perItemLink ? `<td style="padding:10px;border-bottom:1px solid #ECEADF;" align="right"><a href="${salesUrl}/${item.saleId}" style="color:#13243C;font-weight:bold;">${cta} →</a></td>` : ''}
+      </tr>`).join('');
+    return {
+      html: `
+        <h3 style="color:${color};font-size:15px;margin:26px 0 6px;">${title} (${items.length})</h3>
+        <table style="width:100%;border-collapse:collapse;background:#FFFFFF;border:1px solid #ECEADF;border-radius:8px;overflow:hidden;margin:10px 0;">
+          <thead><tr style="background:#F8F7F2;">
+            <th></th>${th(copy.vehicle)}${th(copy.reserve)}${withOffers ? th(copy.best) + th(copy.offers) : ''}${perItemLink ? '<th></th>' : ''}
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+        <p style="color:#5A5E66;font-size:14px;">${note}</p>
+        <div style="text-align:center;margin:18px 0 8px;">
+          <a href="${url}" style="background-color:#13243C;color:white;padding:12px 25px;text-decoration:none;border-radius:5px;font-weight:bold;">${cta}</a>
+        </div>`,
+      text: `${title} (${items.length}) : ${items.map((item) => `${item.vehicleLabel}${item.bestOffer != null ? ` (${formatAmount(item.bestOffer)})` : ''}`).join(', ')}. ${note} ${url}`,
+    };
+  };
+
+  const sections = [
+    section({ title: copy.awardedTitle, note: copy.awardedNote, color: '#1F7A4D', items: awarded, cta: copy.awardedCta, url: salesUrl }),
+    section({ title: copy.belowTitle, note: copy.belowNote, color: '#B04A2C', items: belowReserve, cta: copy.belowCta, url: salesUrl, perItemLink: true }),
+    section({ title: copy.noneTitle, note: copy.noneNote, color: '#5A5E66', items: noOffers, cta: copy.noneCta, url: vehiclesUrl, withOffers: false }),
+  ];
+
+  return {
+    subject: copy.subject,
+    text: [copy.intro, ...sections.map((entry) => entry.text).filter(Boolean)].join('\n\n'),
+    html: layout({
+      heading: copy.heading,
+      footer: copy.footer,
+      body: `
+        <p style="color:#1A2230;font-size:16px;">${copy.hello}</p>
+        <p style="color:#5A5E66;font-size:14px;">${copy.intro}</p>
+        ${sections.map((entry) => entry.html).join('')}
+      `,
+    }),
   };
 };
 
@@ -1017,7 +1239,7 @@ const saleReattributedSellerEmail = ({ user, brand, model, year, photoUrl, sessi
  */
 const saleCertificateReadyEmail = ({ user, brand, model, year, photoUrl, sessionName, saleId }) => {
   const lang = normalizeLanguage(user.language);
-  const url = `${CLIENT_BASE_URL}${WON_SALE_PATH[lang]}/${saleId}`;
+  const url = `${CLIENT_BASE_URL}${wonSalePath(user, lang)}/${saleId}`;
   const vehicleLabel = [brand, model].filter(Boolean).join(' ') || (lang === 'fr' ? 'Véhicule' : 'Vehicle');
 
   const copy = {
@@ -1157,7 +1379,7 @@ const rejectionBlock = (reasonLabel, comment, labels) => `
  */
 const saleCertificateRejectedBuyerEmail = ({ user, brand, model, year, photoUrl, sessionName, saleId, reason, comment }) => {
   const lang = normalizeLanguage(user.language);
-  const url = `${CLIENT_BASE_URL}${WON_SALE_PATH[lang]}/${saleId}`;
+  const url = `${CLIENT_BASE_URL}${wonSalePath(user, lang)}/${saleId}`;
   const vehicleLabel = [brand, model].filter(Boolean).join(' ') || (lang === 'fr' ? 'Véhicule' : 'Vehicle');
   const reasonLabel = REJECTION_REASON_LABELS[lang][reason] || reason;
 
@@ -1262,7 +1484,7 @@ const saleCertificateRejectedAdminEmail = ({ user, vehicleLabel, sessionName, se
  */
 const saleHandoverReadyBuyerEmail = ({ user, brand, model, year, photoUrl, sessionName, saleId }) => {
   const lang = normalizeLanguage(user.language);
-  const url = `${CLIENT_BASE_URL}${WON_SALE_PATH[lang]}/${saleId}`;
+  const url = `${CLIENT_BASE_URL}${wonSalePath(user, lang)}/${saleId}`;
   const vehicleLabel = [brand, model].filter(Boolean).join(' ') || (lang === 'fr' ? 'Véhicule' : 'Vehicle');
 
   const copy = {
@@ -1320,7 +1542,7 @@ const saleClosedEmail = ({ user, role, brand, model, year, photoUrl, sessionName
   const lang = normalizeLanguage(user.language);
   const isBuyer = role === 'acheteur';
   const url = isBuyer
-    ? `${CLIENT_BASE_URL}${WON_SALE_PATH[lang]}/${saleId}`
+    ? `${CLIENT_BASE_URL}${wonSalePath(user, lang)}/${saleId}`
     : `${CLIENT_BASE_URL}${SELLER_SALES_PATH[lang]}/${saleId}`;
   const vehicleLabel = [brand, model].filter(Boolean).join(' ') || (lang === 'fr' ? 'Véhicule' : 'Vehicle');
 
@@ -1385,7 +1607,7 @@ const saleClosedEmail = ({ user, role, brand, model, year, photoUrl, sessionName
 const saleReattributedWinnerEmail = ({ user, brand, model, year, photoUrl, sessionName, saleId, amount, deadlineHours }) => {
   const lang = normalizeLanguage(user.language);
   const locale = lang === 'fr' ? 'fr-FR' : 'en-GB';
-  const url = `${CLIENT_BASE_URL}${WON_SALE_PATH[lang]}/${saleId}`;
+  const url = `${CLIENT_BASE_URL}${wonSalePath(user, lang)}/${saleId}`;
   const vehicleLabel = [brand, model].filter(Boolean).join(' ') || (lang === 'fr' ? 'Véhicule' : 'Vehicle');
   const price = amount != null ? Number(amount).toLocaleString(locale) : null;
   const delay = formatDeadline(deadlineHours, lang);
@@ -1439,7 +1661,11 @@ const saleReattributedWinnerEmail = ({ user, brand, model, year, photoUrl, sessi
   };
 };
 
-const BIDS_PATH = { fr: '/fr/acheteur/tableau-de-bord/mes-offres', en: '/en/buyer/dashboard/my-bids' };
+const BIDS_PATHS = {
+  acheteur: { fr: '/fr/acheteur/tableau-de-bord/mes-offres', en: '/en/buyer/dashboard/my-bids' },
+  vendeur: { fr: '/fr/vendeur/mes-offres', en: '/en/seller/my-bids' },
+};
+const bidsPath = (user, lang) => (BIDS_PATHS[user?.role] || BIDS_PATHS.acheteur)[lang];
 
 /**
  * Envoyé à la clôture d'une session aux enchérisseurs classés juste derrière le gagnant.
@@ -1450,7 +1676,7 @@ const BIDS_PATH = { fr: '/fr/acheteur/tableau-de-bord/mes-offres', en: '/en/buye
 const saleWaitingListEmail = ({ user, brand, model, year, photoUrl, sessionName, amount }) => {
   const lang = normalizeLanguage(user.language);
   const locale = lang === 'fr' ? 'fr-FR' : 'en-GB';
-  const url = `${CLIENT_BASE_URL}${BIDS_PATH[lang]}`;
+  const url = `${CLIENT_BASE_URL}${bidsPath(user, lang)}`;
   const vehicleLabel = [brand, model].filter(Boolean).join(' ') || (lang === 'fr' ? 'Véhicule' : 'Vehicle');
   const price = amount != null ? Number(amount).toLocaleString(locale) : null;
   const copy = {
@@ -1520,10 +1746,12 @@ module.exports = {
   saleStepReminderEmail,
   adminLatePaymentAlertEmail,
   adminVehicleMaxAttemptsEmail,
+  adminSellerEarlyAcceptanceEmail,
   saleWinnerRemovedEmail,
   saleReattributedWinnerEmail,
   saleWaitingListEmail,
   saleAwardedSellerEmail,
+  saleClosureSummarySellerEmail,
   saleBuyerConfirmedSellerEmail,
   saleReattributedSellerEmail,
   saleUnsoldSellerEmail,
@@ -1587,7 +1815,7 @@ const sellerStampRequiredEmail = ({ user, brand, model, saleId }) => {
 const buyerSellerStampValidationEmail = ({ user, brand, model, saleId }) => {
   const lang = normalizeLanguage(user.language);
   const vehicleLabel = [brand, model].filter(Boolean).join(' ') || (lang === 'fr' ? 'Véhicule' : 'Vehicle');
-  const url = `${CLIENT_BASE_URL}${WON_SALE_PATH[lang]}/${saleId}`;
+  const url = `${CLIENT_BASE_URL}${wonSalePath(user, lang)}/${saleId}`;
   const copy = lang === 'fr' ? {
     subject: `Documents vendeur à valider — ${vehicleLabel} - DealAutoPro`,
     heading: 'Le tampon vendeur attend votre validation',
@@ -1618,3 +1846,44 @@ const buyerSellerStampValidationEmail = ({ user, brand, model, saleId }) => {
 
 module.exports.sellerStampRequiredEmail = sellerStampRequiredEmail;
 module.exports.buyerSellerStampValidationEmail = buyerSellerStampValidationEmail;
+
+const supportTicketAdminReplyEmail = ({ user, ticket, content }) => {
+  const lang = normalizeLanguage(user.language);
+  const role = getUserRole(user.role);
+  const url = `${CLIENT_BASE_URL}${SUPPORT_PATHS[lang][role]}`;
+  const preview = String(content || '').replace(/\s+/g, ' ').trim().slice(0, 280);
+  const copy = lang === 'fr' ? {
+    subject: `Réponse du support - ${ticket.title} - DealAutoPro`,
+    heading: 'Le support vous a répondu',
+    hello: `Bonjour ${user.firstName || ''} ${user.lastName || ''},`.replace(/\s+,/, ','),
+    intro: `Notre équipe a répondu à votre demande support « ${ticket.title} ».`,
+    cta: 'Voir ma demande',
+    footer: "L'équipe DealAutoPro",
+    text: `Le support DealAutoPro a répondu à votre demande "${ticket.title}". ${preview ? `Message : ${preview}. ` : ''}Consultez votre espace support : ${url}`,
+  } : {
+    subject: `Support reply - ${ticket.title} - DealAutoPro`,
+    heading: 'Support has replied',
+    hello: `Hello ${user.firstName || ''} ${user.lastName || ''},`.replace(/\s+,/, ','),
+    intro: `Our team has replied to your support request “${ticket.title}”.`,
+    cta: 'View my request',
+    footer: 'The DealAutoPro team',
+    text: `DealAutoPro support replied to your request "${ticket.title}". ${preview ? `Message: ${preview}. ` : ''}Open your support area: ${url}`,
+  };
+
+  return {
+    subject: copy.subject,
+    text: copy.text,
+    html: layout({
+      heading: copy.heading,
+      footer: copy.footer,
+      body: `
+        <p style="color:#1A2230;font-size:16px;">${copy.hello}</p>
+        <p style="color:#5A5E66;font-size:14px;">${copy.intro}</p>
+        ${preview ? `<div style="margin:18px 0;padding:14px;border-left:4px solid #D9704F;background:#FFFFFF;color:#1A2230;font-size:14px;">${preview}</div>` : ''}
+        <div style="text-align:center;margin:30px 0;"><a href="${url}" style="background-color:#D9704F;color:white;padding:12px 25px;text-decoration:none;border-radius:5px;font-weight:bold;">${copy.cta}</a></div>
+      `,
+    }),
+  };
+};
+
+module.exports.supportTicketAdminReplyEmail = supportTicketAdminReplyEmail;

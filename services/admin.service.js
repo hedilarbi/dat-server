@@ -6,6 +6,7 @@ const Session = require('../models/session.model');
 const Sale = require('../models/sale.model');
 const { sendEmail } = require('../config/mail');
 const { normalizeLanguage, approvalEmail, rejectionEmail, correctionEmail } = require('./emailTemplates.service');
+const notificationService = require('./notification.service');
 
 // expo-server-sdk v6 ships as an ES Module ("type": "module"); require()-ing it crashes on
 // Vercel's Node runtime (ERR_REQUIRE_ESM), so it must be loaded via dynamic import() instead.
@@ -21,7 +22,9 @@ const STATUS_GROUP_MAP = {
   attente: 'soumis',
   correction: 'correction_demandee',
   valide: 'valide',
-  refuse: { $in: ['refuse', 'bloque', 'suspendu'] },
+  refuse: 'refuse',
+  // Même regroupement que le badge « Suspendu / Bloqué » de la liste des inscriptions admin.
+  suspendu: { $in: ['suspendu', 'bloque'] },
 };
 
 const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -110,9 +113,10 @@ const getUsers = async (filters = {}) => {
       User.countDocuments({ ...roleScopedQuery, status: STATUS_GROUP_MAP.correction }),
       User.countDocuments({ ...roleScopedQuery, status: STATUS_GROUP_MAP.valide }),
       User.countDocuments({ ...roleScopedQuery, status: STATUS_GROUP_MAP.refuse }),
+      User.countDocuments({ ...roleScopedQuery, status: STATUS_GROUP_MAP.suspendu }),
       User.countDocuments(roleScopedQuery),
       User.countDocuments({ ...roleScopedQuery, createdAt: { $gte: monthStart } }),
-    ]).then(([totalAll, acheteur, vendeur, enAttente, correction, valide, refuse, roleTotal, newThisMonth]) => ({
+    ]).then(([totalAll, acheteur, vendeur, enAttente, correction, valide, refuse, suspendu, roleTotal, newThisMonth]) => ({
       all: totalAll,
       acheteur,
       vendeur,
@@ -120,6 +124,7 @@ const getUsers = async (filters = {}) => {
       correction,
       valide,
       refuse,
+      suspendu,
       roleTotal,
       newThisMonth,
     })),
@@ -154,6 +159,10 @@ const approveUser = async (userId) => {
     await sendEmail({
       to: user.email,
       ...approvalEmail(user)
+    });
+    if (user.role === 'vendeur') await notificationService.createSellerNotification({
+      sellerId: user._id, type: 'account_approved', category: 'inscription',
+      title: 'Compte vendeur validé', message: 'Votre compte professionnel a été validé.'
     });
   } catch (emailError) {
     console.error(`Erreur d'envoi du mail d'approbation : ${emailError.message}`);
@@ -231,6 +240,10 @@ const rejectUser = async (userId, { motifs, comment }) => {
       to: user.email,
       ...rejectionEmail({ user, reasonsText, reasonsPlain, comment })
     });
+    if (user.role === 'vendeur') await notificationService.createSellerNotification({
+      sellerId: user._id, type: 'account_rejected', category: 'inscription',
+      title: 'Inscription refusée', message: `Votre inscription a été refusée : ${reasonsPlain}.`
+    });
   } catch (emailError) {
     console.error(`Erreur d'envoi du mail de refus : ${emailError.message}`);
   }
@@ -302,6 +315,10 @@ const requestCorrection = async (userId, { motifs, comment }) => {
       to: user.email,
       ...correctionEmail({ user, reasonsText, reasonsPlain, comment })
     });
+    if (user.role === 'vendeur') await notificationService.createSellerNotification({
+      sellerId: user._id, type: 'account_correction_requested', category: 'inscription',
+      title: 'Correction demandée', message: `Votre inscription doit être corrigée : ${reasonsPlain}.`
+    });
   } catch (emailError) {
     console.error(`Erreur d'envoi du mail de correction : ${emailError.message}`);
   }
@@ -335,7 +352,7 @@ const requestCorrection = async (userId, { motifs, comment }) => {
 /**
  * Suspendre ou bloquer un utilisateur
  */
-const updateUserStatus = async (userId, newStatus) => {
+const updateUserStatus = async (userId, newStatus, { suspensionNote } = {}) => {
   const allowed = ['valide', 'suspendu', 'bloque'];
   if (!allowed.includes(newStatus)) {
     const err = new Error('Statut invalide.');
@@ -350,16 +367,38 @@ const updateUserStatus = async (userId, newStatus) => {
     throw err;
   }
 
+  if (newStatus === 'suspendu' && user.role === 'acheteur') {
+    const note = String(suspensionNote || '').trim();
+    if (!note) {
+      const err = new Error('La raison de suspension est obligatoire pour un compte acheteur.');
+      err.codeName = 'admin.suspension_note_required';
+      err.statusCode = 400;
+      throw err;
+    }
+    user.suspension = {
+      note,
+      source: 'admin',
+      reason: 'admin',
+      date: new Date(),
+    };
+  } else if (newStatus === 'valide') {
+    user.suspension = undefined;
+  }
+
   user.status = newStatus;
   await user.save();
 
-  if ((newStatus === 'suspendu' || newStatus === 'bloque') && user.role === 'acheteur') {
+  // Un vendeur achète aussi : il suit les mêmes règles que l'acheteur sur ses achats (ceux
+  // encore à l'étape 1 sont réattribués), et ses véhicules sortent en plus des sessions pas
+  // encore clôturées. Seuls ses achats déjà engagés et ses ventes en cours se poursuivent.
+  if ((newStatus === 'suspendu' || newStatus === 'bloque') && ['acheteur', 'vendeur'].includes(user.role)) {
+    const { revokeOngoingSalesForSuspendedBuyer, withdrawSuspendedSellerVehicles } = require('./sale.service');
     try {
-      const { revokeOngoingSalesForSuspendedBuyer } = require('./sale.service');
       await revokeOngoingSalesForSuspendedBuyer(user._id, 'suspension_admin');
     } catch (err) {
       console.error(`Erreur réattribution des ventes lors de la suspension admin de ${user._id}:`, err.message);
     }
+    if (user.role === 'vendeur') await withdrawSuspendedSellerVehicles(user._id);
   }
 
   const userObj = user.toObject();
@@ -376,7 +415,9 @@ const getDashboardStats = async () => {
     User.countDocuments({ status: STATUS_GROUP_MAP.attente, role: 'acheteur' }),
     User.countDocuments({ status: STATUS_GROUP_MAP.attente, role: 'vendeur' }),
   ]);
-  const pendingDossiersCount = await VehicleDossier.countDocuments({ status: 'soumis' });
+  const pendingDossiersCount = await VehicleDossier.countDocuments({
+    status: { $in: ['soumis', 'en_attente_validation'] }
+  });
   const pendingTicketsCount = await Ticket.countDocuments({ status: 'en_attente_admin' });
 
   // KPIs
@@ -571,6 +612,79 @@ const listPayments = async (filters = {}) => {
   };
 };
 
+/**
+ * Historique des suspensions d'un compte et des pénalités qu'il a réglées pour être réactivé,
+ * pour la fiche acheteur/vendeur de l'admin.
+ */
+const getUserSuspensionHistory = async (userId) => {
+  const Payment = require('../models/payment.model');
+  const user = await User.findById(userId).select('status suspension pendingCommission suspensionHistory updatedAt').lean();
+  if (!user) {
+    const err = new Error('Utilisateur introuvable.');
+    err.codeName = 'admin.user_not_found';
+    err.statusCode = 404;
+    throw err;
+  }
+
+  const suspensions = [...(user.suspensionHistory || [])];
+  // L'historique n'existe que depuis son introduction : une suspension en cours plus ancienne
+  // n'y figure pas. On la reconstitue à partir de la suspension courante pour ne pas la masquer.
+  const isSuspended = ['suspendu', 'bloque'].includes(user.status);
+  if (isSuspended && !suspensions.some((entry) => !entry.endedAt)) {
+    suspensions.push({
+      status: user.status,
+      source: user.suspension?.source || 'admin',
+      reason: user.suspension?.reason || 'admin',
+      note: user.suspension?.note,
+      debtAmount: user.pendingCommission?.amount,
+      sale: user.pendingCommission?.saleId,
+      startedAt: user.suspension?.date || null,
+      endedAt: null,
+    });
+  }
+
+  const payments = await Payment.find({ user: userId, type: 'reactivation_compte' })
+    .sort({ paidAt: -1 })
+    .lean();
+
+  // Libellé du véhicule concerné, pour chaque vente citée par une suspension ou un paiement
+  const saleIds = [...suspensions.map((entry) => entry.sale), ...payments.map((payment) => payment.sale)].filter(Boolean);
+  const sales = saleIds.length
+    ? await Sale.find({ _id: { $in: saleIds } }).select('vehicle').populate('vehicle', 'brand model registrationNumber').lean()
+    : [];
+  const vehicleLabelBySale = new Map(sales.map((sale) => [
+    String(sale._id),
+    [sale.vehicle?.brand, sale.vehicle?.model].filter(Boolean).join(' ') + (sale.vehicle?.registrationNumber ? ` (${sale.vehicle.registrationNumber})` : ''),
+  ]));
+  const saleRef = (saleId) => (saleId ? { id: String(saleId), vehicleLabel: vehicleLabelBySale.get(String(saleId)) || null } : null);
+
+  return {
+    suspensions: suspensions
+      .sort((a, b) => new Date(b.startedAt || 0) - new Date(a.startedAt || 0))
+      .map((entry) => ({
+        status: entry.status,
+        source: entry.source,
+        reason: entry.reason,
+        note: entry.note || null,
+        debtAmount: entry.debtAmount ?? null,
+        sale: saleRef(entry.sale),
+        startedAt: entry.startedAt || null,
+        endedAt: entry.endedAt || null,
+        endedBy: entry.endedBy || null,
+      })),
+    penaltyPayments: payments.map((payment) => ({
+      id: String(payment._id),
+      amount: payment.amount,
+      debtReason: payment.debtReason,
+      status: payment.status,
+      paidAt: payment.paidAt,
+      mode: payment.mode,
+      stripeReference: payment.stripePaymentIntentId || payment.stripeSessionId || null,
+      sale: saleRef(payment.sale),
+    })),
+  };
+};
+
 module.exports = {
   getUsers,
   approveUser,
@@ -579,4 +693,5 @@ module.exports = {
   updateUserStatus,
   getDashboardStats,
   listPayments,
+  getUserSuspensionHistory,
 };

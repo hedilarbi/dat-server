@@ -12,6 +12,7 @@ router.post('/users/:id/validate', adminController.approveUser);
 router.post('/users/:id/reject', adminController.rejectUser);
 router.post('/users/:id/request-correction', adminController.requestCorrection);
 router.put('/users/:id/status', adminController.updateStatus);
+router.get('/users/:id/suspension-history', adminController.getUserSuspensionHistory);
 
 router.get('/dashboard-stats', adminController.getDashboardStats);
 router.get('/payments', adminController.getPayments);

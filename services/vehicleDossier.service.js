@@ -1,5 +1,7 @@
 const VehicleDossier = require('../models/vehicleDossier.model');
 const User = require('../models/user.model');
+const Sale = require('../models/sale.model');
+const Offer = require('../models/offer.model');
 const RefusalReason = require('../models/refusalReason.model');
 const { sendEmail } = require('../config/mail');
 const { normalizeLanguage, dossierApprovalEmail, dossierRejectionEmail, dossierCorrectionEmail } = require('./emailTemplates.service');
@@ -63,12 +65,16 @@ const resolveReasonMessages = async (motifs, language) => {
 // (refusals), qui sont tous des champs du schéma mais réservés au serveur/à l'admin.
 const VEHICLE_FIELDS = [
   'brand', 'model', 'year', 'mileage', 'engine', 'fuelType', 'vin', 'description',
-  'reservePrice', 'conditionDetails', 'registrationNumber', 'session',
+  'reservePrice', 'conditionDetails', 'registrationNumber',
   'registrationCountry', 'firstRegistrationDate', 'co2', 'energyLabel', 'vehicleGenre',
   'fiscalPower', 'bodyType', 'gearbox', 'passengerCount', 'doorCount', 'color', 'vrade',
   'procedure', 'vehicleAddress', 'vehicleAddressDetails', 'registrationCardAvailable', 'registrationCardMissingReasons',
   'identificationSheetAvailable', 'policeBookNumber'
 ];
+
+const SELLER_EDITABLE_STATUSES = ['brouillon', 'soumis', 'en_attente_validation', 'correction_demandee', 'valide'];
+const SELLER_DELETABLE_STATUSES = ['brouillon', 'soumis', 'en_attente_validation', 'correction_demandee', 'refuse', 'valide'];
+const ACTIVE_PURCHASE_STATUSES = ['en_cours'];
 
 const BLUR_ZONE_FIELDS = ['page', 'x', 'y', 'width', 'height'];
 
@@ -104,13 +110,60 @@ const pickDocument = (doc) => ({
   height: doc.height
 });
 
+const requireSessionDetachConfirmation = (dossier, confirmed, action = 'modifier') => {
+  if (!dossier.session || confirmed === true) return;
+  const error = new Error(`Ce véhicule est rattaché à une session. Confirmez que vous souhaitez le détacher de la session avant de ${action} ce dossier.`);
+  error.statusCode = 409;
+  error.codeName = 'vehicleDossier.session_detach_confirmation_required';
+  throw error;
+};
+
+const detachFromSession = (dossier) => {
+  if (!dossier.session) return false;
+  dossier.session = null;
+  dossier.lotNumber = null;
+  return true;
+};
+
+const cancelActiveOffersForListing = async (dossierId, sessionId) => {
+  if (!sessionId) return;
+  await Offer.updateMany(
+    { vehicle: dossierId, session: sessionId, status: 'active' },
+    { $set: { status: 'annulee', cancelledAt: new Date() } }
+  );
+};
+
+const notifyAdminOfSellerChange = async (dossier, sellerId, action) => {
+  try {
+    const seller = await User.findById(sellerId).select('companyName firstName lastName');
+    await notificationService.createAdminVehicleDossierChangedNotification(dossier, seller, action);
+  } catch (err) {
+    console.error(`Erreur lors de la notification admin (${action} dossier véhicule) : ${err.message}`);
+  }
+};
+
+const assertNoActivePurchaseForSellerAction = async (dossierId) => {
+  const activeSale = await Sale.findOne({ vehicle: dossierId, status: { $in: ACTIVE_PURCHASE_STATUSES } })
+    .select('_id')
+    .lean();
+  if (!activeSale) return;
+  const error = new Error('Ce véhicule est en cours de vente. Le vendeur ne peut plus modifier ou supprimer le dossier pendant la procédure de vente.');
+  error.statusCode = 403;
+  error.codeName = 'vehicleDossier.active_sale_locked';
+  throw error;
+};
+
 const pickEditableFields = (payload) => {
   const result = {};
   for (const field of VEHICLE_FIELDS) {
     if (payload[field] !== undefined) result[field] = payload[field];
   }
   if (payload.photos !== undefined) {
-    result.photos = (payload.photos || []).map((photo, index) => ({ ...pickPhoto(photo), isCover: index === 0 }));
+    result.photos = (payload.photos || []).map((photo, index) => ({
+      ...pickPhoto(photo),
+      order: index,
+      isCover: index === 0
+    }));
   }
   if (payload.expertReport !== undefined) {
     result.expertReport = payload.expertReport ? pickDocument(payload.expertReport) : undefined;
@@ -213,44 +266,36 @@ const getOwnedDossier = async (dossierId, sellerId) => {
 const updateDossier = async (dossierId, sellerId, payload) => {
   const dossier = await getOwnedDossier(dossierId, sellerId);
 
-  if (!['brouillon', 'correction_demandee'].includes(dossier.status)) {
+  if (!SELLER_EDITABLE_STATUSES.includes(dossier.status)) {
     const error = new Error('Ce dossier ne peut plus être modifié dans son statut actuel.');
     error.statusCode = 403;
     error.codeName = 'vehicleDossier.not_editable';
     throw error;
   }
 
-  const fields = pickEditableFields(payload);
-  if (fields.registrationNumber && fields.registrationNumber !== dossier.registrationNumber) {
-    const cleanReg = fields.registrationNumber.trim().replace(/[\s-]/g, '');
-    if (cleanReg) {
-      const existing = await VehicleDossier.findOne({
-        registrationNumber: new RegExp(`^${cleanReg}$`, 'i'),
-        _id: { $ne: dossierId }
-      });
-      if (existing) {
-        const error = new Error(`Un dossier véhicule existe déjà avec le matricule / immatriculation « ${fields.registrationNumber} ».`);
-        error.statusCode = 400;
-        error.codeName = 'vehicleDossier.registration_number_exists';
-        throw error;
-      }
-    }
-  }
+  await assertNoActivePurchaseForSellerAction(dossierId);
+  requireSessionDetachConfirmation(dossier, payload.confirmSessionDetach, 'modifier');
+  const detachedSessionId = dossier.session;
 
-  const wasCorrection = dossier.status === 'correction_demandee';
+  const fields = pickEditableFields(payload);
+  if (fields.registrationNumber !== undefined && (fields.registrationNumber || '') !== (dossier.registrationNumber || '')) {
+    const error = new Error("Le matricule d'un dossier véhicule existant ne peut pas être modifié.");
+    error.statusCode = 403;
+    error.codeName = 'vehicleDossier.registration_number_immutable';
+    throw error;
+  }
+  delete fields.registrationNumber;
+
   Object.assign(dossier, fields);
 
-  if (payload.submit) {
-    assertSubmittable(dossier);
-    dossier.status = 'soumis';
-    dossier.submittedAt = new Date();
-    if (wasCorrection && dossier.refusals.length > 0) {
-      dossier.refusals[dossier.refusals.length - 1].resubmittedAt = new Date();
-    }
-  }
+  if (payload.submit) assertSubmittable(dossier);
+  detachFromSession(dossier);
+  dossier.status = 'en_attente_validation';
+  dossier.submittedAt = new Date();
 
   await dossier.save();
-  if (payload.submit) await notifyAdminOfSubmission(dossier, sellerId);
+  await cancelActiveOffersForListing(dossier._id, detachedSessionId);
+  await notifyAdminOfSellerChange(dossier, sellerId, 'updated');
   return dossier;
 };
 
@@ -292,15 +337,22 @@ const listDossiers = async (sellerId, filters = {}) => {
 
 const getDossierById = async (dossierId, sellerId) => getOwnedDossier(dossierId, sellerId);
 
-const deleteDossier = async (dossierId, sellerId) => {
+const deleteDossier = async (dossierId, sellerId, options = {}) => {
   const dossier = await getOwnedDossier(dossierId, sellerId);
-  if (dossier.status !== 'brouillon') {
-    const error = new Error('Seul un dossier en brouillon peut être supprimé.');
+  if (!SELLER_DELETABLE_STATUSES.includes(dossier.status)) {
+    const error = new Error('Ce dossier ne peut pas être supprimé dans son statut actuel.');
     error.statusCode = 403;
     error.codeName = 'vehicleDossier.not_deletable';
     throw error;
   }
+  await assertNoActivePurchaseForSellerAction(dossierId);
+  requireSessionDetachConfirmation(dossier, options.confirmSessionDetach, 'supprimer');
+  const sessionId = dossier.session;
+  const shouldNotifyAdmin = dossier.status !== 'brouillon';
+  detachFromSession(dossier);
+  await cancelActiveOffersForListing(dossier._id, sessionId);
   await dossier.deleteOne();
+  if (shouldNotifyAdmin) await notifyAdminOfSellerChange(dossier, sellerId, 'deleted');
 };
 
 // ---------------------------------------------------------------------------
@@ -349,13 +401,15 @@ const adminListDossiers = async (filters = {}) => {
 
   const [dossiers, total, counts] = await Promise.all([
     VehicleDossier.find(query)
-      .populate('seller', 'companyName email firstName lastName')
+      // `status` permet à l'admin d'afficher « Compte vendeur suspendu » à côté des véhicules
+      // qu'il ne peut plus mettre en session.
+      .populate('seller', 'companyName email firstName lastName status')
       .sort({ updatedAt: -1 })
       .skip((page - 1) * limit)
       .limit(limit),
     VehicleDossier.countDocuments(query),
     Promise.all([
-      VehicleDossier.countDocuments({ status: 'soumis' }),
+      VehicleDossier.countDocuments({ status: { $in: ['soumis', 'en_attente_validation'] } }),
       VehicleDossier.countDocuments({ status: 'correction_demandee' }),
       VehicleDossier.countDocuments({ status: 'valide' }),
       VehicleDossier.countDocuments({ status: 'refuse' }),
@@ -397,9 +451,22 @@ const adminUpdateDossier = async (dossierId, payload) => {
   return dossier;
 };
 
+const adminDeleteDossier = async (dossierId) => {
+  const dossier = await VehicleDossier.findById(dossierId);
+  if (!dossier) {
+    const error = new Error('Dossier véhicule introuvable.');
+    error.statusCode = 404;
+    error.codeName = 'vehicleDossier.not_found';
+    throw error;
+  }
+  await dossier.deleteOne();
+};
+
 const adminGetAvailableDossiers = async () => {
-  return VehicleDossier.find({ status: 'valide', session: null })
-    .populate('seller', 'companyName firstName lastName email')
+  const Sale = require('../models/sale.model');
+  const vehiclesInPurchase = await Sale.distinct('vehicle', { status: 'en_cours' });
+  return VehicleDossier.find({ status: 'valide', session: null, _id: { $nin: vehiclesInPurchase } })
+    .populate('seller', 'companyName firstName lastName email status')
     .sort({ updatedAt: -1 })
     .lean();
 };
@@ -418,7 +485,13 @@ const adminUpdateDossierMedia = async (dossierId, payload) => {
     throw error;
   }
 
-  if (payload.photos !== undefined) dossier.photos = (payload.photos || []).map(pickPhoto);
+  if (payload.photos !== undefined) {
+    dossier.photos = (payload.photos || []).map((photo, index) => ({
+      ...pickPhoto(photo),
+      order: index,
+      isCover: index === 0
+    }));
+  }
   if (payload.expertReport !== undefined) dossier.expertReport = payload.expertReport ? pickDocument(payload.expertReport) : undefined;
   if (payload.additionalDocuments !== undefined) dossier.additionalDocuments = (payload.additionalDocuments || []).map(pickDocument);
 
@@ -437,6 +510,11 @@ const approveDossier = async (dossierId) => {
 
   dossier.status = 'valide';
   await dossier.save();
+  await notificationService.createSellerNotification({
+    sellerId: seller._id, type: 'vehicle_dossier_approved', category: 'dossier_vehicule',
+    title: 'Dossier véhicule validé', message: `Votre dossier « ${vehicleLabel} » a été validé.`,
+    metadata: { dossierId: dossier._id.toString(), status: 'valide' }
+  });
   await sendPushNotification(seller, {
     title: 'Dossier véhicule validé !',
     body: `Votre dossier "${vehicleLabel}" a été validé.`,
@@ -466,6 +544,11 @@ const rejectDossier = async (dossierId, { motifs, comment }) => {
   dossier.status = 'refuse';
   dossier.refusals.push({ date: new Date(), motifs, motifsLabels: reasonMessages, comment: comment || '' });
   await dossier.save();
+  await notificationService.createSellerNotification({
+    sellerId: seller._id, type: 'vehicle_dossier_rejected', category: 'dossier_vehicule',
+    title: 'Dossier véhicule refusé', message: `Votre dossier « ${vehicleLabel} » a été refusé : ${reasonsPlain}.`,
+    metadata: { dossierId: dossier._id.toString(), status: 'refuse' }
+  });
   await sendPushNotification(seller, {
     title: 'Dossier véhicule refusé',
     body: `Votre dossier "${vehicleLabel}" a été refusé. Consultez votre espace pour plus de détails.`,
@@ -495,6 +578,11 @@ const requestDossierCorrection = async (dossierId, { motifs, comment }) => {
   dossier.status = 'correction_demandee';
   dossier.refusals.push({ date: new Date(), motifs, motifsLabels: reasonMessages, comment: comment || '' });
   await dossier.save();
+  await notificationService.createSellerNotification({
+    sellerId: seller._id, type: 'vehicle_dossier_correction_requested', category: 'dossier_vehicule',
+    title: 'Correction demandée', message: `Le dossier « ${vehicleLabel} » doit être corrigé : ${reasonsPlain}.`,
+    metadata: { dossierId: dossier._id.toString(), status: 'correction_demandee' }
+  });
   await sendPushNotification(seller, {
     title: 'Correction demandée sur votre dossier véhicule',
     body: `Veuillez mettre à jour le dossier "${vehicleLabel}" dans votre espace.`,
@@ -513,6 +601,7 @@ module.exports = {
   adminListDossiers,
   adminGetDossierById,
   adminUpdateDossier,
+  adminDeleteDossier,
   adminUpdateDossierMedia,
   approveDossier,
   rejectDossier,

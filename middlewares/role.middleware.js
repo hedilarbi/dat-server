@@ -34,6 +34,7 @@ module.exports = {
   adminOnly: authorize('admin'),
   vendeurOnly: authorize('vendeur'),
   acheteurOnly: authorize('acheteur'),
+  acheteurOrVendeur: authorize('acheteur', 'vendeur'),
   vendeurOrAdmin: authorize('vendeur', 'admin'),
   vendeurValideOnly: requireValidatedSeller(false),
   vendeurValideOrAdmin: requireValidatedSeller(true),

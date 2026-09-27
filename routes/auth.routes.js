@@ -14,6 +14,7 @@ router.post('/logout', authController.logout);
 
 // Routes sécurisées par JWT
 router.post('/register-step2', protect, authController.registerStep2);
+router.put('/me', protect, authController.updateProfile);
 router.get('/me', protect, authController.getMe);
 router.put('/me/language', protect, authController.updateLanguage);
 router.put('/me/stamp', protect, authController.updateStamp);

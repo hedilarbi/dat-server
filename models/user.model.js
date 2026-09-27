@@ -132,9 +132,82 @@ const userSchema = new mongoose.Schema({
       enum: ['commission_impayee', 'penalite_etape_2'],
       default: 'commission_impayee'
     }
-  }
+  },
+  suspension: {
+    note: { type: String, trim: true },
+    source: { type: String, enum: ['admin', 'system'] },
+    reason: {
+      type: String,
+      enum: ['admin', 'commission_impayee', 'penalite_etape_2']
+    },
+    date: { type: Date }
+  },
+  // Historique des suspensions et blocages : `suspension` ci-dessus ne décrit que la suspension
+  // en cours et disparaît à la réactivation. Alimenté automatiquement par le hook de sauvegarde
+  // plus bas, à chaque changement de statut — aucun chemin de suspension ne peut l'oublier.
+  suspensionHistory: [{
+    status: { type: String, enum: ['suspendu', 'bloque'] },
+    source: { type: String, enum: ['admin', 'system'] },
+    reason: { type: String, enum: ['admin', 'commission_impayee', 'penalite_etape_2'] },
+    note: { type: String, trim: true },
+    // Dette à régler au moment de la suspension (commission de l'étape 1 ou pénalité de l'étape 2)
+    debtAmount: { type: Number },
+    sale: { type: mongoose.Schema.Types.ObjectId, ref: 'Sale' },
+    startedAt: { type: Date },
+    endedAt: { type: Date },
+    // Levée par le paiement de la dette, ou réactivation manuelle par l'administration
+    endedBy: { type: String, enum: ['paiement', 'admin'] }
+  }]
 }, {
   timestamps: true
+});
+
+const SUSPENDED_STATUSES = ['suspendu', 'bloque'];
+
+// Statut et dette tels que chargés depuis la base : le hook de sauvegarde en a besoin pour
+// détecter une transition (Mongoose ne conserve pas l'ancienne valeur d'un champ modifié).
+function rememberSuspensionState(user) {
+  user.$locals.originalStatus = user.status;
+  user.$locals.originalHadDebt = Boolean(user.pendingCommission && user.pendingCommission.amount);
+}
+
+userSchema.post('init', function () {
+  rememberSuspensionState(this);
+});
+
+// Ouvrir une entrée d'historique à l'entrée en suspension/blocage, la clôturer à la sortie.
+userSchema.pre('save', function () {
+  const user = this;
+  if (user.isNew || !user.isModified('status')) return;
+
+  const previous = user.$locals.originalStatus;
+  const next = user.status;
+  const wasSuspended = SUSPENDED_STATUSES.includes(previous);
+  const isSuspended = SUSPENDED_STATUSES.includes(next);
+  const openEntry = [...user.suspensionHistory].reverse().find((entry) => !entry.endedAt);
+
+  if (!wasSuspended && isSuspended) {
+    user.suspensionHistory.push({
+      status: next,
+      source: user.suspension?.source || 'admin',
+      reason: user.suspension?.reason || 'admin',
+      note: user.suspension?.note || undefined,
+      debtAmount: user.pendingCommission?.amount || undefined,
+      sale: user.pendingCommission?.saleId || undefined,
+      startedAt: user.suspension?.date || new Date(),
+    });
+  } else if (wasSuspended && isSuspended && openEntry) {
+    // Passage de suspendu à bloqué (ou l'inverse) : même période, statut mis à jour.
+    openEntry.status = next;
+  } else if (wasSuspended && !isSuspended && openEntry) {
+    const debtCleared = user.$locals.originalHadDebt && !(user.pendingCommission && user.pendingCommission.amount);
+    openEntry.endedAt = new Date();
+    openEntry.endedBy = debtCleared ? 'paiement' : 'admin';
+  }
+});
+
+userSchema.post('save', function () {
+  rememberSuspensionState(this);
 });
 
 // Middleware Mongoose pour hacher le mot de passe avant de sauvegarder

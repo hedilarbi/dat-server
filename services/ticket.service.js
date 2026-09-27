@@ -1,5 +1,7 @@
 const Ticket = require('../models/ticket.model');
 const User = require('../models/user.model');
+const { sendEmail } = require('../config/mail');
+const { supportTicketAdminReplyEmail } = require('./emailTemplates.service');
 const { createAdminTicketNotification } = require('./notification.service');
 
 /**
@@ -13,6 +15,35 @@ const notifyAdminOfNewTicket = async (ticket, userId) => {
   } catch (err) {
     console.error(`Erreur lors de la notification admin (nouveau ticket support) : ${err.message}`);
   }
+};
+
+const notifyUserOfAdminReply = async (ticket, content) => {
+  const ticketOwnerId = ticket.user?._id || ticket.user;
+  const user = await User.findById(ticketOwnerId).select('email firstName lastName companyName role language').lean();
+
+  if (!user) {
+    const err = new Error("Utilisateur du ticket introuvable : l'e-mail de réponse support n'a pas pu être envoyé.");
+    err.codeName = 'ticket.user_not_found';
+    err.statusCode = 500;
+    throw err;
+  }
+
+  if (!['acheteur', 'vendeur'].includes(user.role)) {
+    const err = new Error("Le destinataire du ticket n'est ni acheteur ni vendeur : l'e-mail de réponse support n'a pas pu être envoyé.");
+    err.codeName = 'ticket.invalid_recipient_role';
+    err.statusCode = 500;
+    throw err;
+  }
+
+  if (!user.email) {
+    const err = new Error("L'utilisateur du ticket n'a pas d'adresse e-mail : la réponse support n'a pas pu être notifiée.");
+    err.codeName = 'ticket.user_email_missing';
+    err.statusCode = 500;
+    throw err;
+  }
+
+  const email = supportTicketAdminReplyEmail({ user, ticket, content });
+  await sendEmail({ to: user.email, ...email });
 };
 
 /**
@@ -150,6 +181,10 @@ const addMessageToTicket = async (ticketId, userId, userRole, messageData) => {
 
   ticket.status = newStatus;
   await ticket.save();
+
+  if (userRole === 'admin') {
+    await notifyUserOfAdminReply(ticket, content);
+  }
 
   // Recharger le ticket avec les populations
   return getTicketById(ticketId, userId, userRole);
