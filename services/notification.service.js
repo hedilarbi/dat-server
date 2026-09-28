@@ -1,4 +1,61 @@
 const Notification = require('../models/notification.model');
+const VehicleDossier = require('../models/vehicleDossier.model');
+const Sale = require('../models/sale.model');
+
+const vehicleDetailsOf = (vehicle) => vehicle ? {
+  registrationNumber: vehicle.registrationNumber || null,
+  brand: vehicle.brand || null,
+  model: vehicle.model || null,
+} : null;
+
+const vehicleDetailsText = (details) => details
+  ? `Immatriculation : ${details.registrationNumber || '—'} · Marque : ${details.brand || '—'} · Modèle : ${details.model || '—'}`
+  : null;
+
+const withVehicleDetails = (message, details) => {
+  const text = vehicleDetailsText(details);
+  if (!text || message.includes('Immatriculation :')) return message;
+  return `${message} — Véhicule : ${text}.`;
+};
+
+const findNotificationVehicle = async (metadata = {}) => {
+  const directId = metadata.vehicleId || metadata.dossierId;
+  if (directId) {
+    return VehicleDossier.findById(directId).select('registrationNumber brand model').lean();
+  }
+  if (!metadata.saleId) return null;
+  const sale = await Sale.findById(metadata.saleId).select('vehicle').lean();
+  return sale?.vehicle
+    ? VehicleDossier.findById(sale.vehicle).select('registrationNumber brand model').lean()
+    : null;
+};
+
+const enrichSellerNotifications = async (notifications) => {
+  const saleIds = notifications
+    .filter((notification) => !notification.metadata?.vehicleId && !notification.metadata?.dossierId && notification.metadata?.saleId)
+    .map((notification) => notification.metadata.saleId);
+  const sales = saleIds.length
+    ? await Sale.find({ _id: { $in: saleIds } }).select('vehicle').lean()
+    : [];
+  const vehicleBySale = new Map(sales.map((sale) => [String(sale._id), String(sale.vehicle)]));
+  const vehicleIds = notifications.map((notification) => (
+    notification.metadata?.vehicleId
+    || notification.metadata?.dossierId
+    || vehicleBySale.get(String(notification.metadata?.saleId || ''))
+  )).filter(Boolean);
+  const vehicles = vehicleIds.length
+    ? await VehicleDossier.find({ _id: { $in: vehicleIds } }).select('registrationNumber brand model').lean()
+    : [];
+  const detailsByVehicle = new Map(vehicles.map((vehicle) => [String(vehicle._id), vehicleDetailsOf(vehicle)]));
+
+  return notifications.map((notification) => {
+    const vehicleId = notification.metadata?.vehicleId
+      || notification.metadata?.dossierId
+      || vehicleBySale.get(String(notification.metadata?.saleId || ''));
+    const details = notification.metadata?.vehicleDetails || detailsByVehicle.get(String(vehicleId || ''));
+    return details ? { ...notification, message: withVehicleDetails(notification.message, details) } : notification;
+  });
+};
 
 const getAdminNotifications = async () => {
   const notifications = await Notification.find({ recipientRole: 'admin' })
@@ -17,22 +74,26 @@ const getAdminNotifications = async () => {
 const getSellerNotifications = async (sellerId) => {
   const scope = { recipientRole: 'vendeur', recipientUser: sellerId };
   const [notifications, unreadCount] = await Promise.all([
-    Notification.find(scope).sort({ createdAt: -1 }).limit(50),
+    Notification.find(scope).sort({ createdAt: -1 }).limit(50).lean(),
     Notification.countDocuments({ ...scope, readAt: null })
   ]);
-  return { notifications, unreadCount };
+  return { notifications: await enrichSellerNotifications(notifications), unreadCount };
 };
 
-const createSellerNotification = async ({ sellerId, type, category = 'autre', title, message, metadata = {} }) =>
-  Notification.create({
+const createSellerNotification = async ({ sellerId, type, category = 'autre', title, message, metadata = {} }) => {
+  const vehicle = await findNotificationVehicle(metadata);
+  const vehicleDetails = vehicleDetailsOf(vehicle);
+  const enrichedMetadata = vehicleDetails ? { ...metadata, vehicleDetails } : metadata;
+  return Notification.create({
     recipientRole: 'vendeur',
     recipientUser: sellerId,
     type,
     category,
     title,
-    message,
-    metadata
+    message: withVehicleDetails(message, vehicleDetails),
+    metadata: enrichedMetadata
   });
+};
 
 const markSellerNotificationAsRead = async (notificationId, sellerId) => {
   const notification = await Notification.findOneAndUpdate(
