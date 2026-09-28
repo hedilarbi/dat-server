@@ -8,6 +8,13 @@ const sessionService = require('../services/session.service');
 const { attachUserIfAuthenticated } = require('../middlewares/auth.middleware');
 
 const router = express.Router();
+const showcaseService = require('../services/showcase.service');
+
+router.get('/showcase', async (req, res, next) => {
+  try {
+    res.json({ vehicles: await showcaseService.listPublicShowcase() });
+  } catch (error) { next(error); }
+});
 
 // Taille d'une page de résultats, et plafond de ce qu'un client peut demander d'un coup.
 const PAGE_SIZE = 12;

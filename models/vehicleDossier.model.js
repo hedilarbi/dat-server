@@ -103,6 +103,9 @@ const vehicleDossierSchema = new mongoose.Schema({
   // session comptabilisée, pour qu'un retrait suivi d'une réaffectation à la même session
   // ne compte pas deux fois.
   listingCount: { type: Number, default: 0 },
+  // Position dans la vitrine publique administrée. `null` signifie que le véhicule n'est
+  // pas exposé aux visiteurs non connectés.
+  showcaseOrder: { type: Number, default: null, index: true },
   // Numéro de lot attribué à la publication dans une session (« Lot #12311 »). Un nouveau
   // numéro est tiré à chaque nouvelle mise en vente : un lot appartient à une session.
   lotNumber: { type: Number, default: null, index: true },

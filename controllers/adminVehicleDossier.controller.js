@@ -1,5 +1,19 @@
 const vehicleDossierService = require('../services/vehicleDossier.service');
 const adminVehicleSalesService = require('../services/adminVehicleSales.service');
+const showcaseService = require('../services/showcase.service');
+
+const listShowcase = async (req, res, next) => {
+  try {
+    res.status(200).json({ success: true, vehicles: await showcaseService.listAdminShowcase() });
+  } catch (error) { next(error); }
+};
+
+const updateShowcase = async (req, res, next) => {
+  try {
+    const vehicles = await showcaseService.updateShowcase(req.body.vehicleIds);
+    res.status(200).json({ success: true, message: 'Vitrine mise à jour.', vehicles });
+  } catch (error) { next(error); }
+};
 
 const listMaxedOutVehicles = async (req, res, next) => {
   try {
@@ -125,5 +139,7 @@ module.exports = {
   getAvailableDossiers,
   listVehicleSales,
   listVehicleOffers,
-  listMaxedOutVehicles
+  listMaxedOutVehicles,
+  listShowcase,
+  updateShowcase
 };
