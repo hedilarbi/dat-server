@@ -168,7 +168,16 @@ const SUSPENDED_STATUSES = ['suspendu', 'bloque'];
 // détecter une transition (Mongoose ne conserve pas l'ancienne valeur d'un champ modifié).
 function rememberSuspensionState(user) {
   user.$locals.originalStatus = user.status;
-  user.$locals.originalHadDebt = Boolean(user.pendingCommission && user.pendingCommission.amount);
+  user.$locals.originalPendingCommission = user.pendingCommission ? {
+    amount: user.pendingCommission.amount,
+    saleId: user.pendingCommission.saleId,
+  } : null;
+  user.$locals.originalSuspension = user.suspension ? {
+    note: user.suspension.note,
+    source: user.suspension.source,
+    reason: user.suspension.reason,
+    date: user.suspension.date,
+  } : null;
 }
 
 userSchema.post('init', function () {
@@ -199,10 +208,30 @@ userSchema.pre('save', function () {
   } else if (wasSuspended && isSuspended && openEntry) {
     // Passage de suspendu à bloqué (ou l'inverse) : même période, statut mis à jour.
     openEntry.status = next;
-  } else if (wasSuspended && !isSuspended && openEntry) {
-    const debtCleared = user.$locals.originalHadDebt && !(user.pendingCommission && user.pendingCommission.amount);
-    openEntry.endedAt = new Date();
-    openEntry.endedBy = debtCleared ? 'paiement' : 'admin';
+  } else if (wasSuspended && !isSuspended) {
+    const originalDebt = user.$locals.originalPendingCommission;
+    const originalSuspension = user.$locals.originalSuspension;
+    const debtCleared = Boolean(originalDebt?.amount) && !(user.pendingCommission && user.pendingCommission.amount);
+    const endedAt = new Date();
+
+    if (openEntry) {
+      openEntry.endedAt = endedAt;
+      openEntry.endedBy = debtCleared ? 'paiement' : 'admin';
+    } else {
+      // Compatibilité avec les comptes suspendus avant l'introduction de l'historique :
+      // leur suspension courante doit être archivée avant que la réactivation ne l'efface.
+      user.suspensionHistory.push({
+        status: previous,
+        source: originalSuspension?.source || 'admin',
+        reason: originalSuspension?.reason || 'admin',
+        note: originalSuspension?.note || undefined,
+        debtAmount: originalDebt?.amount || undefined,
+        sale: originalDebt?.saleId || undefined,
+        startedAt: originalSuspension?.date || user.updatedAt || endedAt,
+        endedAt,
+        endedBy: debtCleared ? 'paiement' : 'admin',
+      });
+    }
   }
 });
 
