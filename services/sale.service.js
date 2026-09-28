@@ -312,28 +312,38 @@ const startPurchaseProcedure = async (sale) => {
 };
 
 /**
- * Offres d'un véhicule proposées au vendeur. Une offre est sélectionnable tant que le compte de
- * l'acheteur n'est ni suspendu ni bloqué : un acheteur écarté d'une vente (délai dépassé,
- * annulation) retrouve tous ses droits dès qu'il a réglé sa pénalité et que son compte est
- * réactivé — y compris celui d'être choisi à nouveau sur cette même vente.
+ * Offres d'un véhicule proposées au vendeur. On ne montre que les choix encore possibles :
+ * acheteur actif et offre jamais consommée par une attribution précédente sur cette vente.
  */
-const serializeSellerOffers = async (vehicleId, sessionId) => {
+const discardedOfferIds = (sale) => new Set(
+  (sale?.waitingList || [])
+    .filter((entry) => entry.status === 'ecarte' || entry.discardReason)
+    .map((entry) => String(entry.offer))
+);
+
+const serializeSellerOffers = async (vehicleId, sessionId, excludedOfferIds = new Set()) => {
   const offers = await Offer.find({ vehicle: vehicleId, session: sessionId, status: 'active' })
     .populate('buyer', 'companyName firstName lastName status')
     .sort({ amount: -1, updatedAt: 1 })
     .lean();
-  return offers.map((offer) => ({
-    id: String(offer._id),
-    amount: offer.amount,
-    createdAt: offer.createdAt,
-    updatedAt: offer.updatedAt,
-    selectable: Boolean(offer.buyer) && !['suspendu', 'bloque'].includes(offer.buyer.status),
-    buyer: offer.buyer ? {
-      companyName: offer.buyer.companyName || '',
-      firstName: offer.buyer.firstName || '',
-      lastName: offer.buyer.lastName || '',
-    } : null,
-  }));
+  return offers
+    .filter((offer) => (
+      offer.buyer
+      && !['suspendu', 'bloque'].includes(offer.buyer.status)
+      && !excludedOfferIds.has(String(offer._id))
+    ))
+    .map((offer) => ({
+      id: String(offer._id),
+      amount: offer.amount,
+      createdAt: offer.createdAt,
+      updatedAt: offer.updatedAt,
+      selectable: true,
+      buyer: {
+        companyName: offer.buyer.companyName || '',
+        firstName: offer.buyer.firstName || '',
+        lastName: offer.buyer.lastName || '',
+      },
+    }));
 };
 
 /**
@@ -628,7 +638,7 @@ const promoteNextBidder = async (saleId, reason = 'delai_depasse') => {
 
   for (const candidate of candidates) {
     const user = await User.findById(candidate.buyer).select('status').lean();
-    if (user && user.status === 'suspendu') {
+    if (user && ['suspendu', 'bloque'].includes(user.status)) {
       candidate.status = 'ecarte';
       candidate.discardedAt = new Date();
       candidate.discardReason = 'compte_suspendu';
@@ -639,8 +649,8 @@ const promoteNextBidder = async (saleId, reason = 'delai_depasse') => {
   }
 
   if (!next) {
-    const remainingOffers = await serializeSellerOffers(sale.vehicle, sale.session);
-    const hasSelectableOffer = remainingOffers.some((offer) => offer.selectable);
+    const remainingOffers = await serializeSellerOffers(sale.vehicle, sale.session, discardedOfferIds(sale));
+    const hasSelectableOffer = remainingOffers.length > 0;
     // Les offres encore exploitables restent proposées au vendeur, même sous la réserve.
     // Si tous les offrants ont été épuisés/suspendus, le véhicule redevient disponible.
     sale.status = hasSelectableOffer ? 'suspendue' : 'sans_gagnant';
@@ -1495,7 +1505,7 @@ const listSellerVehicles = async (sellerId) => {
       .sort({ updatedAt: -1 })
       .lean(),
     Sale.find({ seller: sellerId })
-      .select('vehicle session status amount currentStep wonAt closedAt createdAt sellerDecisionDueAt')
+      .select('vehicle session status amount currentStep wonAt closedAt createdAt sellerDecisionDueAt waitingList')
       .sort({ createdAt: -1 })
       .lean(),
   ]);
@@ -1513,6 +1523,15 @@ const listSellerVehicles = async (sellerId) => {
     offerStatsByListing(vehicles.map((vehicle) => vehicle._id)),
   ]);
   const sessionsById = new Map(sessions.map((session) => [String(session._id), session]));
+
+  const selectableOffersBySale = new Map(await Promise.all(
+    sales
+      .filter((sale) => sale.status === 'suspendue')
+      .map(async (sale) => [
+        String(sale._id),
+        await serializeSellerOffers(sale.vehicle, sale.session, discardedOfferIds(sale)),
+      ])
+  ));
 
   const rows = vehicles.map((vehicle) => {
     const sale = latestSaleByVehicle.get(String(vehicle._id)) || null;
@@ -1537,9 +1556,18 @@ const listSellerVehicles = async (sellerId) => {
     // Motif du dernier renvoi : affiché tel quel au vendeur, il vaut mieux qu'un statut.
     const lastRefusal = (vehicle.refusals || []).slice(-1)[0] || null;
 
-    const stats = vehicle.session
-      ? (offerStats.get(`${vehicle._id}:${vehicle.session}`) || EMPTY_OFFER_STATS)
-      : EMPTY_OFFER_STATS;
+    const selectableOffers = sale?.status === 'suspendue'
+      ? (selectableOffersBySale.get(String(sale._id)) || [])
+      : null;
+    const stats = selectableOffers
+      ? {
+          count: selectableOffers.length,
+          bestOffer: selectableOffers[0]?.amount ?? null,
+          topOffers: selectableOffers.slice(0, 3).map((offer) => offer.amount).reverse(),
+        }
+      : vehicle.session
+        ? (offerStats.get(`${vehicle._id}:${vehicle.session}`) || EMPTY_OFFER_STATS)
+        : EMPTY_OFFER_STATS;
 
     return {
       id: String(vehicle._id),
@@ -1620,6 +1648,14 @@ const listSellerSales = async (sellerId) => {
     ...liveVehicles.map((vehicle) => vehicle._id),
   ]);
   const statsOn = (vehicleId, sessionId) => offerStats.get(`${vehicleId}:${sessionId}`) || EMPTY_OFFER_STATS;
+  const selectableOffersBySale = new Map(await Promise.all(
+    sales
+      .filter((sale) => sale.status === 'suspendue' && sale.vehicle)
+      .map(async (sale) => [
+        String(sale._id),
+        await serializeSellerOffers(sale.vehicle._id, sale.session?._id, discardedOfferIds(sale)),
+      ])
+  ));
 
   const inSession = liveVehicles
     .filter((vehicle) => liveSessionsById.has(String(vehicle.session)))
@@ -1662,14 +1698,24 @@ const listSellerSales = async (sellerId) => {
 
   const serialized = sales.map((sale) => {
     const vehicle = sale.vehicle;
+    const selectableOffers = sale.status === 'suspendue'
+      ? (selectableOffersBySale.get(String(sale._id)) || [])
+      : null;
+    const stats = selectableOffers
+      ? {
+          count: selectableOffers.length,
+          bestOffer: selectableOffers[0]?.amount ?? null,
+          topOffers: selectableOffers.slice(0, 3).map((offer) => offer.amount).reverse(),
+        }
+      : vehicle ? statsOn(vehicle._id, sale.session?._id) : EMPTY_OFFER_STATS;
     return {
       id: String(sale._id),
       status: sale.status,
       amount: sale.amount,
       reservePrice: sale.reservePrice ?? null,
-      offerCount: vehicle ? statsOn(vehicle._id, sale.session?._id).count : 0,
-      bestOffer: vehicle ? statsOn(vehicle._id, sale.session?._id).bestOffer : null,
-      topOffers: vehicle ? statsOn(vehicle._id, sale.session?._id).topOffers : [],
+      offerCount: stats.count,
+      bestOffer: stats.bestOffer,
+      topOffers: stats.topOffers,
       waitingCount: (sale.waitingList || []).length,
       currentStep: sale.status === 'en_cours' ? sale.currentStep : null,
       currentStepDueAt: sale.status === 'en_cours' ? (sale.currentStepDueAt || null) : null,
@@ -2125,7 +2171,7 @@ const getSellerSale = async (saleId, sellerId) => {
 
   const vehicle = sale.vehicle;
   const offers = sale.status === 'suspendue'
-    ? await serializeSellerOffers(vehicle._id, sale.session._id)
+    ? await serializeSellerOffers(vehicle._id, sale.session._id, discardedOfferIds(sale))
     : [];
   const unsoldReason = sale.status === 'sans_gagnant'
     ? ((sale.waitingList || []).some((entry) => entry.status === 'ecarte' || entry.discardReason)
@@ -2249,6 +2295,12 @@ const acceptSellerOffer = async ({ vehicleId, offerId, sellerId }) => {
   }
 
   let sale = await Sale.findOne({ vehicle: vehicle._id, session: offer.session });
+  if (sale && discardedOfferIds(sale).has(String(offer._id))) {
+    const err = new Error("Cette offre a déjà été consommée et n'est plus disponible.");
+    err.codeName = 'sale.offer_not_available';
+    err.statusCode = 409;
+    throw err;
+  }
   if (sale?.status === 'suspendue' && sale.sellerDecisionDueAt && new Date(sale.sellerDecisionDueAt) <= new Date()) {
     await expireSellerDecision(sale);
     const err = new Error("Le délai de décision vendeur est dépassé. Le véhicule est revenu en attente de session.");
