@@ -46,7 +46,7 @@ const COLUMN_PATHS = {
 // multiplierait le poids de la réponse sans rien afficher de plus.
 const HEAVY_FIELDS = [
   'photos', 'expertReport', 'additionalDocuments', 'refusals',
-  'sessionDoc', 'saleDoc', 'offerStats', '__v',
+  'sessionDoc', 'saleSessionDoc', 'effectiveSessionDoc', 'saleDoc', 'offerStats', '__v',
 ];
 
 const parseColumnFilters = (raw) => {
@@ -139,9 +139,21 @@ const enrichmentStages = () => [
   },
   { $unwind: { path: '$saleDoc', preserveNullAndEmptyArrays: true } },
   {
+    // Certaines ventes sous réserve créées avant le correctif ont conservé leur session sur
+    // la vente, mais plus sur le dossier véhicule. Cette jointure garde leur historique lisible.
+    $lookup: {
+      from: 'sessions',
+      localField: 'saleDoc.session',
+      foreignField: '_id',
+      as: 'saleSessionDoc',
+    },
+  },
+  { $unwind: { path: '$saleSessionDoc', preserveNullAndEmptyArrays: true } },
+  { $addFields: { effectiveSessionDoc: { $ifNull: ['$sessionDoc', '$saleSessionDoc'] } } },
+  {
     $lookup: {
       from: 'offers',
-      let: { vehicleId: '$_id', sessionId: '$sessionDoc._id' },
+      let: { vehicleId: '$_id', sessionId: '$effectiveSessionDoc._id' },
       pipeline: [
         {
           $match: {
@@ -173,8 +185,8 @@ const enrichmentStages = () => [
               // un `$ne` direct sur un champ manquant ne se comporte pas comme attendu.
               case: {
                 $and: [
-                  { $ne: [{ $ifNull: ['$sessionDoc._id', null] }, null] },
-                  { $not: [{ $in: [{ $ifNull: ['$sessionDoc.status', ''] }, FINISHED_SESSION_STATUSES] }] },
+                  { $ne: [{ $ifNull: ['$effectiveSessionDoc._id', null] }, null] },
+                  { $not: [{ $in: [{ $ifNull: ['$effectiveSessionDoc.status', ''] }, FINISHED_SESSION_STATUSES] }] },
                 ],
               },
               then: 'en_enchere',
@@ -211,7 +223,7 @@ const adminListVehicleSales = async (filters = {}) => {
   const postEnrichmentMatch = [];
   if (columnFilters.session) {
     postEnrichmentMatch.push({
-      $match: { 'sessionDoc.name': new RegExp(escapeRegExp(columnFilters.session), 'i') }
+      $match: { 'effectiveSessionDoc.name': new RegExp(escapeRegExp(columnFilters.session), 'i') }
     });
   }
 
@@ -260,8 +272,8 @@ const adminListVehicleSales = async (filters = {}) => {
               },
               session: {
                 $cond: [
-                  { $ifNull: ['$sessionDoc._id', false] },
-                  { _id: '$sessionDoc._id', name: '$sessionDoc.name', status: '$sessionDoc.status', endDate: '$sessionDoc.endDate' },
+                  { $ifNull: ['$effectiveSessionDoc._id', false] },
+                  { _id: '$effectiveSessionDoc._id', name: '$effectiveSessionDoc.name', status: '$effectiveSessionDoc.status', endDate: '$effectiveSessionDoc.endDate' },
                   null,
                 ],
               },
@@ -366,8 +378,8 @@ const adminListMaxedOutVehicles = async ({ limit } = {}) => {
         $addFields: {
           session: {
             $cond: [
-              { $ifNull: ['$sessionDoc._id', false] },
-              { _id: '$sessionDoc._id', name: '$sessionDoc.name', status: '$sessionDoc.status' },
+              { $ifNull: ['$effectiveSessionDoc._id', false] },
+              { _id: '$effectiveSessionDoc._id', name: '$effectiveSessionDoc.name', status: '$effectiveSessionDoc.status' },
               null,
             ],
           },

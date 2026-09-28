@@ -2291,8 +2291,10 @@ const acceptSellerOffer = async ({ vehicleId, offerId, sellerId }) => {
   const deadlineHours = await startPurchaseProcedure(sale);
   await sale.save();
 
-  // Retrait immédiat de la session : plus aucune nouvelle offre ne peut être déposée.
-  vehicle.session = null;
+  // Avant la clôture, retirer le véhicule empêche toute nouvelle offre. Après la clôture,
+  // conserver sa session d'origine : elle reste la session qui a produit la vente et doit
+  // demeurer visible dans le suivi administratif.
+  vehicle.session = isEarlyAcceptance ? null : offer.session;
   await vehicle.save();
   const session = await Session.findById(offer.session).lean();
   await notifyWinner(sale, vehicle, session || { name: '' }, deadlineHours);
