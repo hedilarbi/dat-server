@@ -452,6 +452,7 @@ const sendSellerClosureSummaries = async ({ session, vehicles, sales }) => {
     const bestOffer = vehicleOffers.length ? Math.max(...vehicleOffers.map((offer) => offer.amount)) : null;
     const item = {
       vehicleLabel: [vehicle.brand, vehicle.model].filter(Boolean).join(' ') || 'Véhicule',
+      registrationNumber: vehicle.registrationNumber || null,
       photoUrl: coverUrl(vehicle),
       reservePrice: sale.reservePrice ?? vehicle.reservePrice ?? null,
       bestOffer,
@@ -495,7 +496,7 @@ const sendSellerClosureSummaries = async ({ session, vehicles, sales }) => {
 const processSessionAttributions = async (session) => {
   // year et photos alimentent la carte véhicule de l'e-mail envoyé au gagnant
   const vehicles = await VehicleDossier.find({ session: session._id, status: 'valide' })
-    .select('brand model year photos seller reservePrice listingCount')
+    .select('brand model year registrationNumber photos seller reservePrice listingCount')
     .lean();
 
   const results = [];
@@ -538,7 +539,7 @@ const processClosedSessions = async () => {
  */
 const processPendingAttributionEmails = async () => {
   const sales = await Sale.find({ status: 'en_cours' })
-    .populate('vehicle', 'brand model year photos')
+    .populate('vehicle', 'brand model year registrationNumber photos')
     .populate('session', 'name');
 
   for (const sale of sales) {
@@ -1329,6 +1330,17 @@ const processStepDeadlines = async () => {
               date: new Date(),
             };
             await buyer.save();
+            try {
+              await notificationService.createAdminSaleDeadlineSuspensionNotification({
+                sale,
+                vehicle,
+                user: buyer,
+                stepKey,
+                reason: SUSPENSION_NOTES.commission_impayee,
+              });
+            } catch (error) {
+              console.error(`Notification admin de suspension impossible (${buyer._id}) : ${error.message}`);
+            }
             await revokeOngoingSalesForSuspendedBuyer(buyer._id, `${stepKey}_delai_depasse`, sale._id);
             await withdrawSuspendedSellerVehicles(buyer._id);
             suspended = true;
@@ -1349,6 +1361,17 @@ const processStepDeadlines = async () => {
               date: new Date(),
             };
             await buyer.save();
+            try {
+              await notificationService.createAdminSaleDeadlineSuspensionNotification({
+                sale,
+                vehicle,
+                user: buyer,
+                stepKey,
+                reason: SUSPENSION_NOTES.penalite_etape_2,
+              });
+            } catch (error) {
+              console.error(`Notification admin de suspension impossible (${buyer._id}) : ${error.message}`);
+            }
             await revokeOngoingSalesForSuspendedBuyer(buyer._id, `${stepKey}_delai_depasse`, sale._id);
             await withdrawSuspendedSellerVehicles(buyer._id);
             suspended = true;

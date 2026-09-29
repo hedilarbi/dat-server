@@ -595,7 +595,7 @@ const listPayments = async (filters = {}) => {
       debtReason: p.debtReason || null,
       typeLabel: p.type === 'paiement_commission'
         ? 'Paiement de commission'
-        : p.debtReason === 'penalite_etape_2' ? 'Pénalité étape 2' : 'Commission impayée — réactivation',
+        : p.debtReason === 'penalite_etape_2' ? 'Montant réglé — étape 2' : 'Commission impayée — réactivation',
       amount: p.amount,
       currency: p.currency || 'eur',
       provider: p.provider || 'stripe',

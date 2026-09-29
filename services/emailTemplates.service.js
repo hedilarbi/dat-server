@@ -754,10 +754,10 @@ const saleWinnerRemovedEmail = ({ user, brand, model, year, photoUrl, sessionNam
       line2: `L'attribution de ce véhicule vous a donc été retirée et celui-ci est proposé au candidat suivant.`,
       line3: suspended
         ? `Conformément à nos règles de fonctionnement, votre compte a été suspendu suite à ce dépassement de délai. Vos accès aux enchères sont temporairement bloqués. Pour régulariser votre situation et réactiver votre compte, veuillez vous connecter à votre espace afin de régler les frais de dossier dus.`
-        : `Aucune pénalité ne vous est appliquée : votre compte reste actif et vous pouvez continuer à enchérir normalement sur la plateforme.`,
+        : `Aucun montant supplémentaire ne vous est demandé : votre compte reste actif et vous pouvez continuer à enchérir normalement sur la plateforme.`,
       text: suspended
         ? `Le délai de l'étape « ${stepLabel} » est écoulé : l'attribution de ${vehicleLabel} vous a été retirée et votre compte a été suspendu. Pour réactiver votre compte, rendez-vous sur votre espace pour régler les frais dus.`
-        : `Le délai de l'étape « ${stepLabel} » est écoulé : l'attribution de ${vehicleLabel} vous a été retirée, sans pénalité. Votre compte reste actif.`,
+        : `Le délai de l'étape « ${stepLabel} » est écoulé : l'attribution de ${vehicleLabel} vous a été retirée, sans montant supplémentaire à régler. Votre compte reste actif.`,
       footer: "L'équipe DealAutoPro"
     },
     en: {
@@ -771,10 +771,10 @@ const saleWinnerRemovedEmail = ({ user, brand, model, year, photoUrl, sessionNam
       line2: `This vehicle has therefore been withdrawn from you and offered to the next candidate.`,
       line3: suspended
         ? `In accordance with our platform rules, your account has been suspended following this missed deadline. Your bidding access is currently blocked. To settle your account and reactivate your profile, please log in to your dashboard to pay the pending processing fees.`
-        : `No penalty applies: your account remains active and you can keep bidding normally on the platform.`,
+        : `No additional amount is due: your account remains active and you can keep bidding normally on the platform.`,
       text: suspended
         ? `The deadline for the "${stepLabel}" step has passed: ${vehicleLabel} has been withdrawn from you and your account has been suspended. Please log in to your account to settle the pending fees and reactivate your profile.`
-        : `The deadline for the "${stepLabel}" step has passed: ${vehicleLabel} has been withdrawn from you, with no penalty. Your account remains active.`,
+        : `The deadline for the "${stepLabel}" step has passed: ${vehicleLabel} has been withdrawn from you, with no additional amount due. Your account remains active.`,
       footer: 'The DealAutoPro team'
     }
   }[lang];
@@ -1032,7 +1032,7 @@ const saleClosureSummarySellerEmail = ({ user, sessionName, awarded = [], belowR
   const copy = {
     fr: {
       subject: `${sessionName} : récapitulatif de clôture de vos véhicules - DealAutoPro`,
-      heading: 'Récapitulatif de clôture',
+      heading: `Récapitulatif de la session ${sessionName} de vente`,
       hello: `Bonjour ${user.firstName || ''} ${user.lastName || ''},`.replace(/\s+,/, ','),
       intro: `La session ${sessionName} est clôturée. Voici le résultat de vos véhicules.`,
       vehicle: 'Véhicule',
@@ -1052,7 +1052,7 @@ const saleClosureSummarySellerEmail = ({ user, sessionName, awarded = [], belowR
     },
     en: {
       subject: `${sessionName}: closing summary of your vehicles - DealAutoPro`,
-      heading: 'Closing summary',
+      heading: `Sales session ${sessionName} summary`,
       hello: `Hello ${user.firstName || ''} ${user.lastName || ''},`.replace(/\s+,/, ','),
       intro: `${sessionName} has closed. Here is the outcome for your vehicles.`,
       vehicle: 'Vehicle',
@@ -1075,10 +1075,11 @@ const saleClosureSummarySellerEmail = ({ user, sessionName, awarded = [], belowR
   const th = (label) => `<th align="left" style="padding:10px;color:#4C5058;font-size:11px;text-transform:uppercase;">${label}</th>`;
   const section = ({ title, note, color, items, cta, url, withOffers = true, perItemLink = false }) => {
     if (!items.length) return { html: '', text: '' };
+    const vehicleName = (item) => `${item.vehicleLabel}${item.registrationNumber ? ` · ${item.registrationNumber}` : ''}`;
     const rows = items.map((item) => `
       <tr>
         <td style="padding:10px;border-bottom:1px solid #ECEADF;width:72px;">${item.photoUrl ? `<img src="${item.photoUrl}" alt="" width="72" height="54" style="display:block;width:72px;height:54px;object-fit:cover;border-radius:6px;" />` : ''}</td>
-        <td style="padding:10px;border-bottom:1px solid #ECEADF;color:#13243C;font-weight:bold;">${item.vehicleLabel}</td>
+        <td style="padding:10px;border-bottom:1px solid #ECEADF;color:#13243C;font-weight:bold;">${vehicleName(item)}</td>
         <td style="padding:10px;border-bottom:1px solid #ECEADF;color:#5A5E66;">${formatAmount(item.reservePrice)}</td>
         ${withOffers ? `<td style="padding:10px;border-bottom:1px solid #ECEADF;color:#D9704F;font-weight:bold;">${item.bestOffer != null ? formatAmount(item.bestOffer) : '—'}</td>
         <td style="padding:10px;border-bottom:1px solid #ECEADF;color:#5A5E66;">${item.offerCount ?? 0}</td>` : ''}
@@ -1097,7 +1098,7 @@ const saleClosureSummarySellerEmail = ({ user, sessionName, awarded = [], belowR
         <div style="text-align:center;margin:18px 0 8px;">
           <a href="${url}" style="background-color:#13243C;color:white;padding:12px 25px;text-decoration:none;border-radius:5px;font-weight:bold;">${cta}</a>
         </div>`,
-      text: `${title} (${items.length}) : ${items.map((item) => `${item.vehicleLabel}${item.bestOffer != null ? ` (${formatAmount(item.bestOffer)})` : ''}`).join(', ')}. ${note} ${url}`,
+      text: `${title} (${items.length}) : ${items.map((item) => `${vehicleName(item)}${item.bestOffer != null ? ` (${formatAmount(item.bestOffer)})` : ''}`).join(', ')}. ${note} ${url}`,
     };
   };
 

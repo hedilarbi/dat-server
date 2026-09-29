@@ -267,6 +267,42 @@ const createAdminLatePaymentNotification = async (sale, vehicle, buyer) => {
 };
 
 /**
+ * Informe l'administration lorsqu'un gagnant est suspendu automatiquement après avoir
+ * dépassé le délai de l'étape 1 (commission) ou de l'étape 2 (virement du véhicule).
+ * Un vendeur peut aussi être concerné lorsqu'il utilise son compte pour acheter.
+ */
+const createAdminSaleDeadlineSuspensionNotification = async ({ sale, vehicle, user, stepKey, reason }) => {
+  const roleLabel = user.role === 'vendeur' ? 'vendeur' : 'acheteur';
+  const userLabel = user.companyName
+    || [user.firstName, user.lastName].filter(Boolean).join(' ')
+    || user.email
+    || 'Utilisateur';
+  const vehicleLabel = [vehicle?.brand, vehicle?.model].filter(Boolean).join(' ') || 'Véhicule';
+  const registrationNumber = vehicle?.registrationNumber || null;
+  const detailedVehicleLabel = `${vehicleLabel}${registrationNumber ? ` · ${registrationNumber}` : ''}`;
+
+  return Notification.create({
+    recipientRole: 'admin',
+    type: 'sale_deadline_account_suspended',
+    category: 'ventes',
+    title: `Compte ${roleLabel} suspendu automatiquement`,
+    message: `Le compte ${roleLabel} ${userLabel} (${user.email || 'e-mail non renseigné'}) a été suspendu. Raison : ${reason} Véhicule : ${detailedVehicleLabel}.`,
+    createdByUser: user._id,
+    metadata: {
+      saleId: sale?._id ? String(sale._id) : null,
+      vehicleId: vehicle?._id ? String(vehicle._id) : null,
+      userId: String(user._id),
+      role: user.role,
+      email: user.email || null,
+      stepKey,
+      reason,
+      vehicleLabel: detailedVehicleLabel,
+      registrationNumber,
+    },
+  });
+};
+
+/**
  * Un vendeur a choisi une offre avant la clôture de la session : le véhicule est retiré de la
  * session en cours et la procédure de vente démarre aussitôt, sans attendre la clôture.
  */
@@ -322,6 +358,7 @@ module.exports = {
   createAdminVehicleMaxAttemptsNotification,
   createAdminTicketNotification,
   createAdminLatePaymentNotification,
+  createAdminSaleDeadlineSuspensionNotification,
   createAdminSellerEarlyAcceptanceNotification,
   createAdminCertificateRejectedNotification,
   markNotificationAsRead,

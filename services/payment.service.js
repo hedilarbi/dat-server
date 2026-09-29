@@ -157,7 +157,7 @@ const createPendingCommissionCheckout = async ({ amount, reason, user, language 
         unit_amount: toMinorUnits(amount),
         product_data: {
           name: reason === 'penalite_etape_2'
-            ? (lang === 'fr' ? 'Pénalité de réactivation DealAutoPro' : 'DealAutoPro reactivation penalty')
+            ? (lang === 'fr' ? 'Montant de réactivation DealAutoPro' : 'DealAutoPro reactivation amount')
             : (lang === 'fr' ? 'Commission DealAutoPro impayée' : 'Unpaid DealAutoPro commission'),
         },
       },
@@ -178,7 +178,7 @@ const createPendingCommissionPaymentIntent = async ({ amount, reason, user }) =>
     amount: toMinorUnits(amount),
     currency: 'eur',
     receipt_email: user.email,
-    description: reason === 'penalite_etape_2' ? 'Pénalité de réactivation DealAutoPro' : 'Commission DealAutoPro impayée',
+    description: reason === 'penalite_etape_2' ? 'Montant de réactivation DealAutoPro' : 'Commission DealAutoPro impayée',
     metadata: {
       userId: String(user._id),
       purpose: 'pending_commission',
