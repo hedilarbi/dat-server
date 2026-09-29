@@ -1,6 +1,7 @@
 const VehicleDossier = require('../models/vehicleDossier.model');
 const User = require('../models/user.model');
 const Offer = require('../models/offer.model');
+const Sale = require('../models/sale.model');
 const mongoose = require('mongoose');
 const generalConfigService = require('./generalConfig.service');
 
@@ -13,13 +14,14 @@ const generalConfigService = require('./generalConfig.service');
  *
  *   en_attente     validé, rattaché à aucune session : en attente d'affectation
  *   en_enchere     rattaché à une session non close (à venir, ouverte ou active)
+ *   decision_vendeur offres sous la réserve après clôture : décision du vendeur attendue
  *   en_cours_vente une vente est en cours (gagnant désigné, procédure d'achat en cours)
  *   vendu          la vente est clôturée
  *
  * L'ordre de priorité compte : une vente prime toujours sur l'état de la session, car un
  * véhicule attribué reste rattaché à la session qui l'a vendu.
  */
-const SALE_STATES = ['en_attente', 'en_enchere', 'en_cours_vente', 'vendu'];
+const SALE_STATES = ['en_attente', 'en_enchere', 'decision_vendeur', 'en_cours_vente', 'vendu'];
 
 // Statuts de session qui n'acceptent plus d'offres : un véhicule qui y reste rattaché
 // n'est plus « en enchère ».
@@ -161,7 +163,6 @@ const enrichmentStages = () => [
               $and: [
                 { $eq: ['$vehicle', '$$vehicleId'] },
                 { $eq: ['$session', '$$sessionId'] },
-                { $eq: ['$status', 'active'] },
               ],
             },
           },
@@ -179,6 +180,7 @@ const enrichmentStages = () => [
           branches: [
             { case: { $eq: ['$saleDoc.status', 'cloturee'] }, then: 'vendu' },
             { case: { $eq: ['$saleDoc.status', 'en_cours'] }, then: 'en_cours_vente' },
+            { case: { $eq: ['$saleDoc.status', 'suspendue'] }, then: 'decision_vendeur' },
             {
               // `$unwind` avec preserveNullAndEmptyArrays laisse le champ ABSENT quand la
               // jointure ne trouve rien : il faut le normaliser avant de le comparer à null,
@@ -321,7 +323,7 @@ const adminListVehicleSales = async (filters = {}) => {
   };
 };
 
-/** Toutes les offres déposées sur le véhicule pendant sa session actuellement rattachée. */
+/** Toutes les offres déposées pendant la session courante ou la dernière session de vente. */
 const adminListVehicleOffers = async (vehicleId) => {
   if (!mongoose.isValidObjectId(vehicleId)) {
     const error = new Error('Véhicule introuvable.');
@@ -339,14 +341,36 @@ const adminListVehicleOffers = async (vehicleId) => {
     throw error;
   }
 
-  const offers = vehicle.session
-    ? await Offer.find({ vehicle: vehicle._id, session: vehicle.session._id })
+  const sale = await Sale.findOne({ vehicle: vehicle._id })
+    .sort({ createdAt: -1 })
+    .select('session winner winningOffer currentRank waitingList status')
+    .populate('session', 'name startDate endDate status')
+    .lean();
+  const sessionId = vehicle.session?._id || sale?.session?._id;
+  const waitingByOffer = new Map((sale?.waitingList || []).map((entry) => [String(entry.offer), entry]));
+
+  const offers = sessionId
+    ? await Offer.find({ vehicle: vehicle._id, session: sessionId })
         .populate('buyer', 'companyName firstName lastName email phone role status')
         .sort({ amount: -1, updatedAt: 1 })
         .lean()
     : [];
 
-  return { vehicle, offers };
+  return {
+    vehicle: { ...vehicle, session: vehicle.session || sale?.session || null },
+    sale: sale ? { _id: sale._id, status: sale.status } : null,
+    offers: offers.map((offer) => {
+      const waitingEntry = waitingByOffer.get(String(offer._id));
+      return {
+        ...offer,
+        rank: waitingEntry?.rank || null,
+        attributionStatus: waitingEntry?.status || null,
+        discardReason: waitingEntry?.discardReason || null,
+        isWinningOffer: String(sale?.winningOffer || '') === String(offer._id),
+        isCurrentWinner: Boolean(sale?.winner && offer.buyer?._id && String(sale.winner) === String(offer.buyer._id)),
+      };
+    }),
+  };
 };
 
 /**
