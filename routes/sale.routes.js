@@ -45,6 +45,9 @@ router.get('/:id', acheteurOrVendeur, saleController.getMySale);
 // Détail complet du véhicule remporté
 router.get('/:id/vehicle', acheteurOrVendeur, saleController.getSaleVehicle);
 
+// Étape 3 : relit l'avancement de la signature électronique (vendeur ou acheteur de la vente)
+router.post('/:id/esignature/sync', acheteurOrVendeur, saleController.syncSignature);
+
 // Étape 1 : ouverture du paiement Stripe de la commission, puis confirmation au retour
 router.post('/:id/commission/checkout', acheteurOrVendeur, saleController.startCommissionPayment);
 router.post('/:id/commission/payment-intent', acheteurOrVendeur, saleController.startCommissionPaymentIntent);

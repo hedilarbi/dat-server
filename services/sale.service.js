@@ -13,7 +13,7 @@ const { fillCertificateOfTransfer } = require('./certificateOfTransfer.service')
 const { fillPurchaseDeclaration } = require('./purchaseDeclaration.service');
 const { saveBuffer } = require('./storage.service');
 const { generateBonEnlevement } = require('./handoverDocument.service');
-const { createSignatureSession, fetchSignedDocument, fetchAuditTrail, fetchSignatureState } = require('./esignature.service');
+const { createSignatureSession, fetchSignedDocument, fetchAuditTrail, fetchSignatureProgress } = require('./esignature.service');
 const { stampSignedBundle } = require('./signedDocumentStamp.service');
 const { isStripeConfigured } = require('../config/stripe');
 
@@ -731,6 +731,14 @@ const revokeOngoingSalesForSuspendedBuyer = async (buyerId, reason = 'compte_sus
   }
 };
 
+// Chaque partie ne reçoit que son propre lien de signature : celui de l'autre lui donnerait
+// accès à sa session de signature.
+const serializeEsignature = (esignature, side) => {
+  if (!esignature) return null;
+  const { sellerUrl, buyerUrl, ...rest } = esignature;
+  return side === 'seller' ? { ...rest, sellerUrl } : { ...rest, buyerUrl };
+};
+
 const serializeSale = (sale) => {
   const vehicle = sale.vehicle;
   const coverPhoto = vehicle && ((vehicle.photos || []).find((photo) => photo.isCover) || vehicle.photos?.[0]);
@@ -747,7 +755,9 @@ const serializeSale = (sale) => {
     currentStepDueAt: sale.currentStepDueAt || null,
     commissionPaidAt: sale.commissionPaidAt || null,
     documentsDelivery: sale.documentsDelivery || null,
-    esignature: sale.esignature || null,
+    // Étape 2 terminée : date à laquelle le vendeur a confirmé avoir reçu le virement
+    transferConfirmedAt: sale.transferConfirmedAt || null,
+    esignature: serializeEsignature(sale.esignature, 'buyer'),
     certificate: {
       url: sale.certificate?.url || null,
       generatedAt: sale.certificate?.generatedAt || null,
@@ -2139,7 +2149,7 @@ const getSellerSale = async (saleId, sellerId) => {
   }
 
   let sale = await Sale.findOne({ _id: saleId, seller: sellerId })
-    .populate('vehicle', 'brand model year mileage photos listingCount registrationNumber registrationCardAvailable')
+    .populate('vehicle', 'brand model year mileage photos listingCount registrationNumber registrationCardAvailable formulaNumber registrationCardMissingMotif')
     .populate('session', 'name endDate')
     .populate('winner', 'companyName firstName lastName email phone address')
     .lean();
@@ -2217,7 +2227,7 @@ const getSellerSale = async (saleId, sellerId) => {
     commissionPaidAt: sale.commissionPaidAt || null,
     documentsDelivery: sale.documentsDelivery || null,
     transferConfirmedAt: sale.transferConfirmedAt || null,
-    esignature: sale.esignature || null,
+    esignature: serializeEsignature(sale.esignature, 'seller'),
     certificate: {
       url: sale.certificate?.url || null,
       generatedAt: sale.certificate?.generatedAt || null,
@@ -2254,6 +2264,9 @@ const getSellerSale = async (saleId, sellerId) => {
       mileage: vehicle.mileage ?? null,
       registrationNumber: vehicle.registrationNumber || null,
       registrationCardAvailable: vehicle.registrationCardAvailable ?? true,
+      // Saisis par le vendeur à l'étape 2, réaffichés dans l'historique de cette étape
+      formulaNumber: vehicle.formulaNumber || null,
+      registrationCardMissingMotif: vehicle.registrationCardMissingMotif || null,
       photoUrl: coverUrl(vehicle),
     } : null,
     session: sale.session ? {
@@ -3163,23 +3176,127 @@ const finalizeSignature = async (saleId, signatureId) => {
 };
 
 /**
+ * Le premier qui signe voit OpenAPI afficher « en attente des autres signataires » et ne sait
+ * plus s'il doit attendre : on lui confirme que sa part est faite, et on prévient l'autre partie
+ * que c'est à son tour.
+ */
+const notifyFirstSignature = async (sale, signedSide) => {
+  try {
+    const [seller, buyer, vehicle] = await Promise.all([
+      User.findById(sale.seller).select('email firstName lastName language role').lean(),
+      User.findById(sale.winner).select('email firstName lastName language role').lean(),
+      VehicleDossier.findById(sale.vehicle).select('brand model').lean(),
+    ]);
+    const common = { brand: vehicle?.brand || '', model: vehicle?.model || '', saleId: String(sale._id) };
+    const signer = signedSide === 'seller' ? seller : buyer;
+    const other = signedSide === 'seller' ? buyer : seller;
+    const otherSide = signedSide === 'seller' ? 'buyer' : 'seller';
+
+    if (signer) {
+      const email = emailTemplates.signatureRecordedEmail({ user: signer, side: signedSide, ...common });
+      await sendEmail({ to: signer.email, subject: email.subject, text: email.text, html: email.html });
+    }
+    if (other) {
+      const email = emailTemplates.signatureYourTurnEmail({ user: other, side: otherSide, ...common });
+      await sendEmail({ to: other.email, subject: email.subject, text: email.text, html: email.html });
+    }
+    if (otherSide === 'seller' && seller) {
+      await notifySellerInApp(seller._id, 'signature_your_turn', 'À vous de signer', 'L’acheteur a signé les documents. Il ne manque plus que votre signature.', sale, vehicle);
+    }
+  } catch (error) {
+    console.error(`Notification de première signature impossible (vente ${sale._id}) : ${error.message}`);
+  }
+};
+
+/**
+ * Relit l'avancement de la signature électronique (étape 3) sur OpenAPI : enregistre qui a déjà
+ * signé, prévient les parties à la première signature, et finalise la vente dès que les deux
+ * ont signé.
+ */
+const refreshSignatureProgress = async (saleId) => {
+  const sale = await Sale.findById(saleId).select('seller winner vehicle status currentStep esignature').lean();
+  if (!sale || sale.status !== 'en_cours' || sale.currentStep !== 3 || !sale.esignature?.operationId) return;
+
+  const operationId = sale.esignature.operationId;
+  const { state, signers } = await fetchSignatureProgress(operationId);
+  if (state === 'DONE') {
+    await finalizeSignature(sale._id, operationId);
+    return;
+  }
+
+  const [seller, buyer] = await Promise.all([
+    User.findById(sale.seller).select('email').lean(),
+    User.findById(sale.winner).select('email').lean(),
+  ]);
+  // Les signataires sont envoyés vendeur puis acheteur : la position sert de repli si l'adresse
+  // du compte a changé depuis la création de la session.
+  const signerOf = (user, position) =>
+    signers.find((signer) => user?.email && signer.email === user.email.trim().toLowerCase()) || signers[position];
+
+  const justSigned = [];
+  for (const [side, user, position] of [['seller', seller, 0], ['buyer', buyer, 1]]) {
+    const field = `esignature.${side}SignedAt`;
+    if (sale.esignature[`${side}SignedAt`] || !signerOf(user, position)?.signed) continue;
+    // Mise à jour conditionnelle : le webhook, la tâche de fond et le retour navigateur peuvent
+    // constater la même signature en même temps, une seule notification doit partir.
+    const result = await Sale.updateOne(
+      { _id: sale._id, currentStep: 3, 'esignature.operationId': operationId, [field]: null },
+      { $set: { [field]: new Date() } },
+    );
+    if (result.modifiedCount === 1) justSigned.push(side);
+  }
+
+  // Si les deux signatures arrivent ensemble, la finalisation se charge des notifications.
+  const otherAlreadySigned = justSigned.length === 1
+    && sale.esignature[`${justSigned[0] === 'seller' ? 'buyer' : 'seller'}SignedAt`];
+  if (justSigned.length === 1 && !otherAlreadySigned) {
+    await notifyFirstSignature(sale, justSigned[0]);
+  }
+};
+
+/**
+ * Appelé par la page de vente au retour de la plateforme de signature (et quand l'onglet reprend
+ * le focus) : relit l'avancement sans attendre le webhook ni la tâche de fond, et indique de
+ * quel côté de la vente se trouve l'utilisateur pour le rediriger vers la bonne page.
+ */
+const syncSignatureForUser = async (saleId, userId) => {
+  const sale = mongoose.isValidObjectId(saleId)
+    ? await Sale.findOne({ _id: saleId, $or: [{ seller: userId }, { winner: userId }] }).select('seller').lean()
+    : null;
+  if (!sale) {
+    const err = new Error('Vente introuvable.');
+    err.codeName = 'sale.not_found';
+    err.statusCode = 404;
+    throw err;
+  }
+
+  try {
+    await refreshSignatureProgress(sale._id);
+  } catch (error) {
+    // OpenAPI indisponible : la page affiche l'état connu, la tâche de fond reprendra.
+    console.error(`Relecture de la signature impossible (vente ${sale._id}) : ${error.message}`);
+  }
+  return { side: String(sale.seller) === String(userId) ? 'seller' : 'buyer' };
+};
+
+/**
  * Rattrape les signatures électroniques terminées dont le webhook OpenAPI n'est jamais arrivé.
  * Sans ce filet, l'étape 3 ne pouvait avancer que par le webhook : s'il se perd, ou s'il ne peut
  * pas joindre le serveur (APP_BASE_URL en localhost pendant le développement), la vente restait
  * bloquée alors que les deux parties avaient signé. Même principe que
- * reconcilePendingCommissionPayments pour les paiements.
+ * reconcilePendingCommissionPayments pour les paiements. Relève aussi la première signature
+ * pour prévenir l'autre partie.
  */
 const reconcilePendingSignatures = async () => {
   const sales = await Sale.find({
     status: 'en_cours',
     currentStep: 3,
     'esignature.operationId': { $nin: [null, ''] },
-  }).select('_id esignature.operationId').lean();
+  }).select('_id').lean();
 
   for (const sale of sales) {
     try {
-      const state = await fetchSignatureState(sale.esignature.operationId);
-      if (state === 'DONE') await finalizeSignature(sale._id, sale.esignature.operationId);
+      await refreshSignatureProgress(sale._id);
     } catch (error) {
       console.error(`Vérification de la signature impossible (vente ${sale._id}) : ${error.message}`);
     }
@@ -3222,5 +3339,7 @@ module.exports = {
   revokeOngoingSalesForSuspendedBuyer,
   withdrawSuspendedSellerVehicles,
   finalizeSignature,
+  refreshSignatureProgress,
+  syncSignatureForUser,
   reconcilePendingSignatures,
 };

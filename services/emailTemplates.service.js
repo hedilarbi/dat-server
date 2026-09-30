@@ -1848,6 +1848,88 @@ const buyerSellerStampValidationEmail = ({ user, brand, model, saleId }) => {
 module.exports.sellerStampRequiredEmail = sellerStampRequiredEmail;
 module.exports.buyerSellerStampValidationEmail = buyerSellerStampValidationEmail;
 
+// Page de la vente selon le côté du destinataire (vendeur ou acheteur de cette vente)
+const salePageUrl = (user, side, lang, saleId) =>
+  `${CLIENT_BASE_URL}${side === 'seller' ? SELLER_SALES_PATH[lang] : wonSalePath(user, lang)}/${saleId}`;
+
+// « name » en sujet de phrase, « of » après « la signature » (du vendeur / de l'acheteur)
+const SIGNATURE_PARTY = {
+  fr: { seller: { name: 'le vendeur', of: 'du vendeur' }, buyer: { name: 'l’acheteur', of: 'de l’acheteur' } },
+  en: { seller: { name: 'the seller', of: 'the seller’s' }, buyer: { name: 'the buyer', of: 'the buyer’s' } },
+};
+
+/** Confirme au premier signataire que sa part est faite : il n'a plus qu'à attendre l'autre. */
+const signatureRecordedEmail = ({ user, side, brand, model, saleId }) => {
+  const lang = normalizeLanguage(user.language);
+  const vehicleLabel = [brand, model].filter(Boolean).join(' ') || (lang === 'fr' ? 'Véhicule' : 'Vehicle');
+  const url = salePageUrl(user, side, lang, saleId);
+  const other = SIGNATURE_PARTY[lang][side === 'seller' ? 'buyer' : 'seller'];
+  const copy = lang === 'fr' ? {
+    subject: `Signature enregistrée — ${vehicleLabel} - DealAutoPro`,
+    heading: 'Votre signature est bien enregistrée',
+    intro: `Merci, vous avez signé les documents de vente de « ${vehicleLabel} ». Il ne manque plus que la signature ${other.of}.`,
+    action: `Vous n’avez rien d’autre à faire : nous vous préviendrons dès que ${other.name} aura signé, et la vente passera automatiquement à l’étape suivante.`,
+    cta: 'Suivre la vente',
+    text: `Votre signature des documents de ${vehicleLabel} est enregistrée. Il ne manque plus que celle ${other.of} : vous n'avez rien d'autre à faire, nous vous préviendrons dès qu'elle sera faite. Suivre la vente : ${url}`,
+  } : {
+    subject: `Signature recorded — ${vehicleLabel} - DealAutoPro`,
+    heading: 'Your signature has been recorded',
+    intro: `Thank you, you have signed the sale documents for “${vehicleLabel}”. Only ${other.of} signature is still missing.`,
+    action: `There is nothing else for you to do: we will let you know as soon as ${other.name} has signed, and the sale will move to the next step automatically.`,
+    cta: 'Follow the sale',
+    text: `Your signature on the ${vehicleLabel} documents has been recorded. Only ${other.of} signature is still missing: there is nothing else for you to do, we will let you know once it is done. Follow the sale: ${url}`,
+  };
+  return {
+    subject: copy.subject,
+    text: copy.text,
+    html: layout({
+      heading: copy.heading, footer: lang === 'fr' ? "L'équipe DealAutoPro" : 'The DealAutoPro team', body: `
+      <p style="color:#1A2230;font-size:16px;">${lang === 'fr' ? `Bonjour ${user.firstName} ${user.lastName},` : `Hello ${user.firstName} ${user.lastName},`}</p>
+      <p style="color:#5A5E66;font-size:14px;">${copy.intro}</p>
+      <p style="color:#13243C;font-size:14px;font-weight:bold;">${copy.action}</p>
+      <div style="text-align:center;margin:30px 0;"><a href="${url}" style="background-color:#13243C;color:white;padding:12px 25px;text-decoration:none;border-radius:5px;font-weight:bold;">${copy.cta}</a></div>`
+    }),
+  };
+};
+
+/** Prévient la partie qui n'a pas encore signé que l'autre l'a fait : c'est son tour. */
+const signatureYourTurnEmail = ({ user, side, brand, model, saleId }) => {
+  const lang = normalizeLanguage(user.language);
+  const vehicleLabel = [brand, model].filter(Boolean).join(' ') || (lang === 'fr' ? 'Véhicule' : 'Vehicle');
+  const url = salePageUrl(user, side, lang, saleId);
+  const signer = SIGNATURE_PARTY[lang][side === 'seller' ? 'buyer' : 'seller'].name;
+  const Signer = signer.charAt(0).toUpperCase() + signer.slice(1);
+  const copy = lang === 'fr' ? {
+    subject: `À vous de signer — ${vehicleLabel} - DealAutoPro`,
+    heading: 'Il ne manque plus que votre signature',
+    intro: `${Signer} a signé les documents de vente de « ${vehicleLabel} ».`,
+    action: 'Signez à votre tour le certificat de cession et la déclaration d’achat pour que la vente se poursuive.',
+    cta: 'Signer les documents',
+    text: `${Signer} a signé les documents de vente de ${vehicleLabel}. Il ne manque plus que votre signature : ${url}`,
+  } : {
+    subject: `Your turn to sign — ${vehicleLabel} - DealAutoPro`,
+    heading: 'Only your signature is missing',
+    intro: `${Signer} has signed the sale documents for “${vehicleLabel}”.`,
+    action: 'Sign the transfer certificate and the purchase declaration so the sale can continue.',
+    cta: 'Sign the documents',
+    text: `${Signer} has signed the sale documents for ${vehicleLabel}. Only your signature is missing: ${url}`,
+  };
+  return {
+    subject: copy.subject,
+    text: copy.text,
+    html: layout({
+      heading: copy.heading, footer: lang === 'fr' ? "L'équipe DealAutoPro" : 'The DealAutoPro team', body: `
+      <p style="color:#1A2230;font-size:16px;">${lang === 'fr' ? `Bonjour ${user.firstName} ${user.lastName},` : `Hello ${user.firstName} ${user.lastName},`}</p>
+      <p style="color:#5A5E66;font-size:14px;">${copy.intro}</p>
+      <p style="color:#13243C;font-size:14px;font-weight:bold;">${copy.action}</p>
+      <div style="text-align:center;margin:30px 0;"><a href="${url}" style="background-color:#D9704F;color:white;padding:12px 25px;text-decoration:none;border-radius:5px;font-weight:bold;">${copy.cta}</a></div>`
+    }),
+  };
+};
+
+module.exports.signatureRecordedEmail = signatureRecordedEmail;
+module.exports.signatureYourTurnEmail = signatureYourTurnEmail;
+
 const supportTicketAdminReplyEmail = ({ user, ticket, content }) => {
   const lang = normalizeLanguage(user.language);
   const role = getUserRole(user.role);

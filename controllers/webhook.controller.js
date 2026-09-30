@@ -1,4 +1,4 @@
-const { finalizeSignature } = require('../services/sale.service');
+const { finalizeSignature, refreshSignatureProgress } = require('../services/sale.service');
 const crypto = require('crypto');
 
 const validWebhookSecret = (received) => {
@@ -34,6 +34,9 @@ exports.handleEsignatureWebhook = async (req, res, next) => {
     if (state === 'DONE') {
       // Finalise la signature (télécharge le doc final, passe à l'étape 7)
       await finalizeSignature(saleId, signatureId);
+    } else {
+      // Étape intermédiaire (une partie a signé) : relit l'avancement pour prévenir l'autre.
+      await refreshSignatureProgress(saleId);
     }
 
     // Répond à OpenAPI que tout est OK

@@ -18,6 +18,15 @@ const getMySale = async (req, res, next) => {
   }
 };
 
+const syncSignature = async (req, res, next) => {
+  try {
+    const { side } = await saleService.syncSignatureForUser(req.params.id, req.user._id);
+    res.status(200).json({ success: true, side });
+  } catch (error) {
+    next(error);
+  }
+};
+
 const getSaleVehicle = async (req, res, next) => {
   try {
     const vehicle = await saleService.getSaleVehicle(req.params.id, req.user._id);
@@ -294,6 +303,7 @@ const rejectSellerCertificate = async (req, res, next) => {
 module.exports = {
   listMySales,
   getMySale,
+  syncSignature,
   getSaleVehicle,
   startCommissionPayment,
   startCommissionPaymentIntent,

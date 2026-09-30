@@ -2,6 +2,15 @@ const axios = require('axios');
 const fs = require('fs');
 const { getSignedUrl } = require('./storage.service');
 
+// Même repli que les e-mails (emailTemplates.service.js) : le retour depuis la plateforme de
+// signature doit désigner le même site que les liens envoyés par courriel.
+const CLIENT_BASE_URL = (process.env.CLIENT_BASE_URL || 'https://dealautopro.com').replace(/\/+$/, '');
+
+// La documentation OpenAPI ne décrit que l'état NEW d'un signataire : on reconnaît les libellés
+// de fin usuels, et une signature entièrement terminée (DONE) vaut pour tous les signataires.
+const SIGNER_DONE_STATES = ['SIGNED', 'DONE', 'COMPLETED'];
+const loggedSignerStates = new Set();
+
 const requiredUrl = (name) => {
   const raw = process.env[name]?.trim();
   if (!raw) throw new Error(`${name} manquant dans les variables d'environnement`);
@@ -90,7 +99,17 @@ const createSignatureSession = async ({ saleId, seller, buyer, certificateBuffer
           { page: 2, x: "340", y: "432" }
         ]
       }
-    ]
+    ],
+    options: {
+      // Par défaut, OpenAPI laisse le signataire modifier son nom et l'adresse qui reçoit l'OTP :
+      // quiconque ouvrirait un lien de signature pourrait alors signer à la place de son titulaire.
+      userEditableData: { name: false, email: false, mobile: false },
+      ui: {
+        // Le premier signataire arrive sur « en attente des autres signataires » : ce bouton le
+        // ramène sur la vente, qui lui confirme qu'il n'a plus rien à faire.
+        completeUrl: `${CLIENT_BASE_URL}/signature-terminee?vente=${encodeURIComponent(saleId)}`
+      }
+    }
   };
 
   try {
@@ -162,10 +181,12 @@ const fetchAuditTrail = async (signatureId) => {
 };
 
 /**
- * État courant d'une signature côté OpenAPI (WAIT_VALIDATION, WAIT_SIGN, DONE, ERROR).
- * Sert à rattraper une signature terminée dont le webhook n'est jamais arrivé.
+ * État courant d'une signature côté OpenAPI (WAIT_VALIDATION, WAIT_SIGN, WAIT_SIGNER, DONE, ERROR)
+ * et avancement de chaque signataire, dans l'ordre d'envoi (vendeur puis acheteur).
+ * Sert à dire à chaque partie où en est l'autre, et à rattraper une signature terminée dont
+ * le webhook n'est jamais arrivé.
  */
-const fetchSignatureState = async (signatureId) => {
+const fetchSignatureProgress = async (signatureId) => {
   const token = process.env.ESIGNATURE_TOKEN;
   if (!token) throw new Error('ESIGNATURE_TOKEN manquant dans les variables d\'environnement');
 
@@ -175,9 +196,22 @@ const fetchSignatureState = async (signatureId) => {
   });
   // Selon les endpoints, l'API renvoie l'objet directement ou l'enveloppe dans { data }.
   const detail = response.data?.data ?? response.data;
-  return detail?.state || null;
+  const state = detail?.state || null;
+  const signers = (detail?.signers || []).map((signer) => {
+    const signerState = String(signer.state || '').toUpperCase();
+    // Trace une seule fois chaque état inconnu, pour ajuster SIGNER_DONE_STATES si besoin.
+    if (signerState && signerState !== 'NEW' && !SIGNER_DONE_STATES.includes(signerState) && !loggedSignerStates.has(signerState)) {
+      loggedSignerStates.add(signerState);
+      console.warn(`État de signataire OpenAPI non reconnu : ${signerState} (signature ${signatureId})`);
+    }
+    return {
+      email: String(signer.email || '').trim().toLowerCase(),
+      signed: state === 'DONE' || SIGNER_DONE_STATES.includes(signerState),
+    };
+  });
+  return { state, signers };
 };
 
-module.exports.fetchSignatureState = fetchSignatureState;
+module.exports.fetchSignatureProgress = fetchSignatureProgress;
 module.exports.fetchSignedDocument = fetchSignedDocument;
 module.exports.fetchAuditTrail = fetchAuditTrail;

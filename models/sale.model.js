@@ -190,6 +190,10 @@ const saleSchema = new mongoose.Schema({
     sellerUrl: { type: String, default: null },
     buyerUrl: { type: String, default: null },
     initiatedAt: { type: Date, default: null },
+    // Avancement par signataire, relu sur OpenAPI : chaque partie voit si l'autre a déjà signé
+    // et n'est prévenue qu'une fois (confirmation au signataire, « à vous » pour l'autre).
+    sellerSignedAt: { type: Date, default: null },
+    buyerSignedAt: { type: Date, default: null },
     signedDocumentUrl: { type: String, default: null },
     signedDocumentFilename: { type: String, default: null },
     sellerStampedUrl: { type: String, default: null },
