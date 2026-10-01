@@ -752,7 +752,8 @@ const revokeOngoingSalesForSuspendedBuyer = async (buyerId, reason = 'compte_sus
 // accès à sa session de signature.
 const serializeEsignature = (esignature, side) => {
   if (!esignature) return null;
-  const { sellerUrl, buyerUrl, ...rest } = esignature;
+  // Le motif technique d'un échec reste réservé à l'administration : les parties n'en voient que la date.
+  const { sellerUrl, buyerUrl, setupError: _setupError, ...rest } = esignature;
   return side === 'seller' ? { ...rest, sellerUrl } : { ...rest, buyerUrl };
 };
 
@@ -2523,8 +2524,11 @@ const startSignature = async (saleId) => {
       declarationFirstPage: certificatePageCount + 1,
     });
   } catch (error) {
-    // Libère le verrou : la prochaine tentative n'attend pas son expiration.
-    await Sale.updateOne({ _id: lease._id, 'esignature.initiatedAt': now }, { $set: { 'esignature.initiatedAt': null } });
+    // Libère le verrou (la prochaine tentative n'attend pas son expiration) et garde la trace de
+    // l'échec : sans elle, les parties attendraient un lien qui ne vient pas.
+    await Sale.updateOne({ _id: lease._id, 'esignature.initiatedAt': now }, {
+      $set: { 'esignature.initiatedAt': null, 'esignature.setupError': error.message, 'esignature.setupErrorAt': new Date() },
+    });
     throw error;
   }
 
@@ -2542,6 +2546,8 @@ const startSignature = async (saleId) => {
       'esignature.certificatePageCount': certificatePageCount,
       'esignature.sellerSignedAt': null,
       'esignature.buyerSignedAt': null,
+      'esignature.setupError': null,
+      'esignature.setupErrorAt': null,
     },
   });
 

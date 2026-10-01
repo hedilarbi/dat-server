@@ -194,6 +194,10 @@ const saleSchema = new mongoose.Schema({
     initiatedAt: { type: Date, default: null },
     // Posé au début de la finalisation : le webhook et la tâche de fond ne la mènent qu'une fois
     finalizingAt: { type: Date, default: null },
+    // Dernier échec de création de la session (motif OpenAPI réservé à l'administration) ; effacé
+    // dès qu'une session est créée. Les parties voient que la signature n'a pas pu être préparée.
+    setupError: { type: String, default: null },
+    setupErrorAt: { type: Date, default: null },
     // Nombre de pages du certificat en tête du dossier : la déclaration commence juste après
     certificatePageCount: { type: Number, default: null },
     // Avancement par signataire, relu sur OpenAPI : chaque partie voit si l'autre a déjà signé

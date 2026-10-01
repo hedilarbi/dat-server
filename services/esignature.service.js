@@ -134,7 +134,9 @@ const createSignatureSession = async ({ saleId, seller, buyer, bundleBuffer, dec
     return response.data.data;
   } catch (error) {
     console.error('Erreur lors de l\'appel à OpenAPI eSignature:', error.response?.data || error.message);
-    throw new Error('La création de la session de signature a échoué.');
+    // Le motif renvoyé par OpenAPI (ex. « Expired Token ») est conservé pour l'administration.
+    const reason = error.response?.data?.message || error.message;
+    throw new Error(`La création de la session de signature a échoué${reason ? ` (${reason})` : ''}.`);
   }
 };
 
