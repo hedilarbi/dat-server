@@ -1274,25 +1274,25 @@ const saleClosedEmail = ({ user, role, brand, model, year, photoUrl, sessionName
 
   const copy = {
     fr: {
-      subject: `Vente clôturée — ${vehicleLabel} - DealAutoPro`,
-      heading: 'La vente est clôturée',
+      subject: `Documents signés, vente clôturée — ${vehicleLabel} - DealAutoPro`,
+      heading: 'C’est bon : la vente est clôturée',
       hello: `Bonjour ${user.firstName} ${user.lastName},`,
       subtitle: [year ? `Année ${year}` : null, sessionName].filter(Boolean).join(' · '),
-      line1: `Les deux parties ont signé les documents de « ${vehicleLabel} » : la vente est finalisée.`,
-      line2: 'Le bon d\'enlèvement, le certificat de cession et la déclaration d\'achat signés sont disponibles dans votre espace.',
-      cta: 'Voir mes documents',
-      text: `Les deux parties ont signé les documents de ${vehicleLabel} : la vente est finalisée. Le bon d'enlèvement et les documents signés sont disponibles ici : ${url}`,
+      line1: `Les documents de « ${vehicleLabel} » sont signés par les deux parties : la vente est clôturée.`,
+      line2: 'Vous trouverez le bon d\'enlèvement ici, avec le certificat de cession et la déclaration d\'achat signés.',
+      cta: 'Voir le bon d\'enlèvement',
+      text: `Les documents de ${vehicleLabel} sont signés par les deux parties : la vente est clôturée. Vous trouverez le bon d'enlèvement ici : ${url}`,
       footer: "L'équipe DealAutoPro"
     },
     en: {
-      subject: `Sale completed — ${vehicleLabel} - DealAutoPro`,
-      heading: 'The sale is complete',
+      subject: `Documents signed, sale completed — ${vehicleLabel} - DealAutoPro`,
+      heading: 'All set: the sale is complete',
       hello: `Hello ${user.firstName} ${user.lastName},`,
       subtitle: [year ? `Year ${year}` : null, sessionName].filter(Boolean).join(' · '),
-      line1: `Both parties have signed the documents for "${vehicleLabel}": the sale is complete.`,
-      line2: 'The pickup slip and the signed transfer certificate and purchase declaration are available in your workspace.',
-      cta: 'View my documents',
-      text: `Both parties have signed the documents for ${vehicleLabel}: the sale is complete. The pickup slip and signed documents are available here: ${url}`,
+      line1: `The documents for "${vehicleLabel}" are signed by both parties: the sale is complete.`,
+      line2: 'You will find the pickup slip here, along with the signed transfer certificate and purchase declaration.',
+      cta: 'View the pickup slip',
+      text: `The documents for ${vehicleLabel} are signed by both parties: the sale is complete. You will find the pickup slip here: ${url}`,
       footer: 'The DealAutoPro team'
     }
   }[lang];
@@ -1477,18 +1477,39 @@ module.exports = {
   saleClosedEmail,
 };
 
-const signatureReadyEmail = ({ user, brand, model, signatureUrl }) => {
-  const isEn = user?.language === 'en';
+/**
+ * Étape 3.3 : l'autre partie vient de valider à son tour les documents ; le destinataire, qui les
+ * avait validés en premier, est invité à les signer. `side` : côté du destinataire.
+ */
+const signatureReadyEmail = ({ user, side, brand, model, signatureUrl }) => {
+  const lang = normalizeLanguage(user.language);
+  const vehicleLabel = [brand, model].filter(Boolean).join(' ') || (lang === 'fr' ? 'Véhicule' : 'Vehicle');
+  const other = lang === 'fr'
+    ? (side === 'seller' ? 'L’acheteur' : 'Le vendeur')
+    : (side === 'seller' ? 'The buyer' : 'The seller');
+  const copy = lang === 'fr' ? {
+    subject: `Documents validés : à vous de signer — ${vehicleLabel} - DealAutoPro`,
+    heading: 'Vous pouvez signer les documents',
+    intro: `${other} a validé à son tour le certificat de cession et la déclaration d’achat de « ${vehicleLabel} ».`,
+    action: 'Signez-les électroniquement : un code de vérification vous sera envoyé par e-mail pour confirmer votre signature.',
+    cta: 'Signer les documents',
+  } : {
+    subject: `Documents approved: your turn to sign — ${vehicleLabel} - DealAutoPro`,
+    heading: 'You can sign the documents',
+    intro: `${other} has also approved the transfer certificate and the purchase declaration for “${vehicleLabel}”.`,
+    action: 'Sign them electronically: a verification code will be emailed to you to confirm your signature.',
+    cta: 'Sign the documents',
+  };
   return {
-    subject: isEn
-      ? `Documents ready for signature - ${brand} ${model}`
-      : `Documents prêts pour signature - ${brand} ${model}`,
-    text: isEn
-      ? `Hello ${user.firstName},\n\nThe sale documents for the ${brand} ${model} are ready.\nPlease click on the link below to sign them electronically:\n${signatureUrl}`
-      : `Bonjour ${user.firstName},\n\nLes documents de vente pour le ${brand} ${model} sont prêts.\nVeuillez cliquer sur le lien ci-dessous pour les signer électroniquement :\n${signatureUrl}`,
-    html: isEn
-      ? `<p>Hello ${user.firstName},</p><p>The sale documents for the ${brand} ${model} are ready.</p><p><a href="${signatureUrl}">Click here to sign the documents</a></p>`
-      : `<p>Bonjour ${user.firstName},</p><p>Les documents de vente pour le ${brand} ${model} sont prêts.</p><p><a href="${signatureUrl}">Cliquez ici pour signer les documents</a></p>`
+    subject: copy.subject,
+    text: `${copy.intro} ${copy.action} ${signatureUrl}`,
+    html: layout({
+      heading: copy.heading, footer: lang === 'fr' ? "L'équipe DealAutoPro" : 'The DealAutoPro team', body: `
+      <p style="color:#1A2230;font-size:16px;">${lang === 'fr' ? `Bonjour ${user.firstName} ${user.lastName},` : `Hello ${user.firstName} ${user.lastName},`}</p>
+      <p style="color:#5A5E66;font-size:14px;">${copy.intro}</p>
+      <p style="color:#13243C;font-size:14px;font-weight:bold;">${copy.action}</p>
+      <div style="text-align:center;margin:30px 0;"><a href="${signatureUrl}" style="background-color:#2F6F4F;color:white;padding:12px 25px;text-decoration:none;border-radius:5px;font-weight:bold;">${copy.cta}</a></div>`
+    }),
   };
 };
 module.exports.signatureReadyEmail = signatureReadyEmail;
@@ -1497,84 +1518,6 @@ module.exports.signatureReadyEmail = signatureReadyEmail;
 // Page de la vente selon le côté du destinataire (vendeur ou acheteur de cette vente)
 const salePageUrl = (user, side, lang, saleId) =>
   `${CLIENT_BASE_URL}${side === 'seller' ? SELLER_SALES_PATH[lang] : wonSalePath(user, lang)}/${saleId}`;
-
-// « name » en sujet de phrase, « of » après « la signature » (du vendeur / de l'acheteur)
-const SIGNATURE_PARTY = {
-  fr: { seller: { name: 'le vendeur', of: 'du vendeur' }, buyer: { name: 'l’acheteur', of: 'de l’acheteur' } },
-  en: { seller: { name: 'the seller', of: 'the seller’s' }, buyer: { name: 'the buyer', of: 'the buyer’s' } },
-};
-
-/** Confirme au premier signataire que sa part est faite : il n'a plus qu'à attendre l'autre. */
-const signatureRecordedEmail = ({ user, side, brand, model, saleId }) => {
-  const lang = normalizeLanguage(user.language);
-  const vehicleLabel = [brand, model].filter(Boolean).join(' ') || (lang === 'fr' ? 'Véhicule' : 'Vehicle');
-  const url = salePageUrl(user, side, lang, saleId);
-  const other = SIGNATURE_PARTY[lang][side === 'seller' ? 'buyer' : 'seller'];
-  const copy = lang === 'fr' ? {
-    subject: `Signature enregistrée — ${vehicleLabel} - DealAutoPro`,
-    heading: 'Votre signature est bien enregistrée',
-    intro: `Merci, vous avez signé les documents de vente de « ${vehicleLabel} ». Il ne manque plus que la signature ${other.of}.`,
-    action: `Vous n’avez rien d’autre à faire : nous vous préviendrons dès que ${other.name} aura signé, et la vente passera automatiquement à l’étape suivante.`,
-    cta: 'Suivre la vente',
-    text: `Votre signature des documents de ${vehicleLabel} est enregistrée. Il ne manque plus que celle ${other.of} : vous n'avez rien d'autre à faire, nous vous préviendrons dès qu'elle sera faite. Suivre la vente : ${url}`,
-  } : {
-    subject: `Signature recorded — ${vehicleLabel} - DealAutoPro`,
-    heading: 'Your signature has been recorded',
-    intro: `Thank you, you have signed the sale documents for “${vehicleLabel}”. Only ${other.of} signature is still missing.`,
-    action: `There is nothing else for you to do: we will let you know as soon as ${other.name} has signed, and the sale will move to the next step automatically.`,
-    cta: 'Follow the sale',
-    text: `Your signature on the ${vehicleLabel} documents has been recorded. Only ${other.of} signature is still missing: there is nothing else for you to do, we will let you know once it is done. Follow the sale: ${url}`,
-  };
-  return {
-    subject: copy.subject,
-    text: copy.text,
-    html: layout({
-      heading: copy.heading, footer: lang === 'fr' ? "L'équipe DealAutoPro" : 'The DealAutoPro team', body: `
-      <p style="color:#1A2230;font-size:16px;">${lang === 'fr' ? `Bonjour ${user.firstName} ${user.lastName},` : `Hello ${user.firstName} ${user.lastName},`}</p>
-      <p style="color:#5A5E66;font-size:14px;">${copy.intro}</p>
-      <p style="color:#13243C;font-size:14px;font-weight:bold;">${copy.action}</p>
-      <div style="text-align:center;margin:30px 0;"><a href="${url}" style="background-color:#13243C;color:white;padding:12px 25px;text-decoration:none;border-radius:5px;font-weight:bold;">${copy.cta}</a></div>`
-    }),
-  };
-};
-
-/** Prévient la partie qui n'a pas encore signé que l'autre l'a fait : c'est son tour. */
-const signatureYourTurnEmail = ({ user, side, brand, model, saleId }) => {
-  const lang = normalizeLanguage(user.language);
-  const vehicleLabel = [brand, model].filter(Boolean).join(' ') || (lang === 'fr' ? 'Véhicule' : 'Vehicle');
-  const url = salePageUrl(user, side, lang, saleId);
-  const signer = SIGNATURE_PARTY[lang][side === 'seller' ? 'buyer' : 'seller'].name;
-  const Signer = signer.charAt(0).toUpperCase() + signer.slice(1);
-  const copy = lang === 'fr' ? {
-    subject: `À vous de signer — ${vehicleLabel} - DealAutoPro`,
-    heading: 'Il ne manque plus que votre signature',
-    intro: `${Signer} a signé les documents de vente de « ${vehicleLabel} ».`,
-    action: 'Signez à votre tour le certificat de cession et la déclaration d’achat pour que la vente se poursuive.',
-    cta: 'Signer les documents',
-    text: `${Signer} a signé les documents de vente de ${vehicleLabel}. Il ne manque plus que votre signature : ${url}`,
-  } : {
-    subject: `Your turn to sign — ${vehicleLabel} - DealAutoPro`,
-    heading: 'Only your signature is missing',
-    intro: `${Signer} has signed the sale documents for “${vehicleLabel}”.`,
-    action: 'Sign the transfer certificate and the purchase declaration so the sale can continue.',
-    cta: 'Sign the documents',
-    text: `${Signer} has signed the sale documents for ${vehicleLabel}. Only your signature is missing: ${url}`,
-  };
-  return {
-    subject: copy.subject,
-    text: copy.text,
-    html: layout({
-      heading: copy.heading, footer: lang === 'fr' ? "L'équipe DealAutoPro" : 'The DealAutoPro team', body: `
-      <p style="color:#1A2230;font-size:16px;">${lang === 'fr' ? `Bonjour ${user.firstName} ${user.lastName},` : `Hello ${user.firstName} ${user.lastName},`}</p>
-      <p style="color:#5A5E66;font-size:14px;">${copy.intro}</p>
-      <p style="color:#13243C;font-size:14px;font-weight:bold;">${copy.action}</p>
-      <div style="text-align:center;margin:30px 0;"><a href="${url}" style="background-color:#D9704F;color:white;padding:12px 25px;text-decoration:none;border-radius:5px;font-weight:bold;">${copy.cta}</a></div>`
-    }),
-  };
-};
-
-module.exports.signatureRecordedEmail = signatureRecordedEmail;
-module.exports.signatureYourTurnEmail = signatureYourTurnEmail;
 
 // Texte saisi par un utilisateur (commentaire d'un signalement), inséré dans le HTML d'un e-mail
 const escapeHtml = (value) => String(value ?? '')
@@ -1607,13 +1550,13 @@ const DOCUMENT_REPORT_REASON_LABELS = {
 /**
  * E-mails de l'étape 3 (documents administratifs). `side` est le côté du destinataire,
  * `by` celui de la partie à l'origine de l'événement (signalement ou dépôt).
- *   preparation  virement confirmé : carte grise à compléter (vendeur), documents en préparation (acheteur)
- *   ready        documents remplis et tamponnés, à vérifier par les deux parties
+ *   stamp_needed la carte grise est saisie mais le tampon du destinataire manque encore
+ *   ready        documents remplis et tamponnés, à vérifier
  *   reported     l'autre partie a signalé une erreur
  *   uploaded     l'autre partie a déposé une version corrigée d'un document
  * Renvoie aussi le titre et le message de la notification interne du vendeur.
  */
-const saleDocumentsEmail = ({ user, side, kind, brand, model, saleId, stampMissing, by, reason, comment, document }) => {
+const saleDocumentsEmail = ({ user, side, kind, brand, model, saleId, by, reason, comment, document }) => {
   const lang = normalizeLanguage(user.language);
   const vehicleLabel = [brand, model].filter(Boolean).join(' ') || (lang === 'fr' ? 'Véhicule' : 'Vehicle');
   const url = salePageUrl(user, side, lang, saleId);
@@ -1628,20 +1571,12 @@ const saleDocumentsEmail = ({ user, side, kind, brand, model, saleId, stampMissi
 
   const copies = {
     fr: {
-      preparation: side === 'seller' ? {
-        subject: `Virement confirmé : complétez la carte grise — ${vehicleLabel} - DealAutoPro`,
-        heading: 'Complétez les informations de la carte grise',
-        intro: `Vous avez confirmé la réception du virement pour « ${vehicleLabel} ». La préparation des documents administratifs commence.`,
-        action: `Renseignez les données complémentaires de la carte grise depuis la vente.${stampMissing ? ' Déposez aussi le tampon de votre entreprise : il est apposé sur le certificat de cession et la déclaration d’achat.' : ''}`,
-        cta: 'Compléter la carte grise',
-      } : {
-        subject: `Virement confirmé — ${vehicleLabel} - DealAutoPro`,
-        heading: 'Le vendeur a confirmé votre virement',
-        intro: `Le vendeur a confirmé la réception de votre virement pour « ${vehicleLabel} ». Les documents administratifs sont en préparation.`,
-        action: stampMissing
-          ? 'Déposez dès maintenant le tampon de votre entreprise : sans lui, les documents ne peuvent pas être préparés.'
-          : 'Vous n’avez rien à faire pour l’instant : nous vous préviendrons dès que les documents seront prêts à vérifier.',
-        cta: 'Suivre la vente',
+      stamp_needed: {
+        subject: `Déposez votre tampon — ${vehicleLabel} - DealAutoPro`,
+        heading: 'Il ne manque plus que votre tampon',
+        intro: `Le vendeur a complété les informations de la carte grise de « ${vehicleLabel} ». Le certificat de cession et la déclaration d’achat seront générés dès que vous aurez déposé le tampon de votre entreprise.`,
+        action: 'Déposez votre tampon depuis la vente : vous pourrez ensuite vérifier les documents.',
+        cta: 'Déposer mon tampon',
       },
       ready: {
         subject: `Documents à vérifier — ${vehicleLabel} - DealAutoPro`,
@@ -1666,20 +1601,12 @@ const saleDocumentsEmail = ({ user, side, kind, brand, model, saleId, stampMissi
       },
     },
     en: {
-      preparation: side === 'seller' ? {
-        subject: `Transfer confirmed: complete the registration card — ${vehicleLabel} - DealAutoPro`,
-        heading: 'Complete the registration card details',
-        intro: `You confirmed receiving the transfer for “${vehicleLabel}”. Preparation of the administrative documents has started.`,
-        action: `Enter the additional registration card details from the sale.${stampMissing ? ' Also upload your company stamp: it is applied to the transfer certificate and the purchase declaration.' : ''}`,
-        cta: 'Complete the registration card',
-      } : {
-        subject: `Transfer confirmed — ${vehicleLabel} - DealAutoPro`,
-        heading: 'The seller confirmed your transfer',
-        intro: `The seller confirmed receiving your transfer for “${vehicleLabel}”. The administrative documents are being prepared.`,
-        action: stampMissing
-          ? 'Upload your company stamp now: without it, the documents cannot be prepared.'
-          : 'There is nothing to do for now: we will let you know as soon as the documents are ready for review.',
-        cta: 'Follow the sale',
+      stamp_needed: {
+        subject: `Upload your stamp — ${vehicleLabel} - DealAutoPro`,
+        heading: 'Only your stamp is missing',
+        intro: `The seller completed the registration card details for “${vehicleLabel}”. The transfer certificate and the purchase declaration will be generated as soon as you upload your company stamp.`,
+        action: 'Upload your stamp from the sale: you will then be able to review the documents.',
+        cta: 'Upload my stamp',
       },
       ready: {
         subject: `Documents to review — ${vehicleLabel} - DealAutoPro`,

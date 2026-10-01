@@ -1845,6 +1845,24 @@ const loadSaleContext = async (saleId) => Sale.findById(saleId)
 /**
  * Confirmer la clôture aux deux parties, chacune avec le lien vers son propre espace.
  */
+/**
+ * Côté du premier signataire, d'après les signatures relevées pendant l'étape 3.3, ou null si
+ * l'ordre n'a pas pu être relevé (les deux ont signé entre deux relectures).
+ */
+const firstSignerSide = (esignature) => {
+  const seller = esignature?.sellerSignedAt ? new Date(esignature.sellerSignedAt) : null;
+  const buyer = esignature?.buyerSignedAt ? new Date(esignature.buyerSignedAt) : null;
+  if (seller && buyer) return buyer < seller ? 'buyer' : 'seller';
+  if (seller) return 'seller';
+  if (buyer) return 'buyer';
+  return null;
+};
+
+/**
+ * Vente clôturée à la signature : le second signataire vient de terminer sur la plateforme de
+ * signature et n'est pas prévenu ; le premier, qui attendait, reçoit l'e-mail avec le lien vers
+ * le bon d'enlèvement. Si l'ordre des signatures est inconnu, les deux sont prévenus.
+ */
 const notifySaleClosed = async (sale) => {
   try {
     const [buyer, seller, context] = await Promise.all([
@@ -1863,11 +1881,14 @@ const notifySaleClosed = async (sale) => {
       saleId: String(sale._id),
     };
 
-    for (const [user, role] of [[buyer, 'acheteur'], [seller, 'vendeur']]) {
+    const firstSigner = firstSignerSide(sale.esignature);
+    for (const [user, role, side] of [[buyer, 'acheteur', 'buyer'], [seller, 'vendeur', 'seller']]) {
       if (!user) continue;
-      const email = emailTemplates.saleClosedEmail({ user, role, ...base });
       try {
-        await sendEmail({ to: user.email, subject: email.subject, text: email.text, html: email.html });
+        if (!firstSigner || firstSigner === side) {
+          const email = emailTemplates.saleClosedEmail({ user, role, ...base });
+          await sendEmail({ to: user.email, subject: email.subject, text: email.text, html: email.html });
+        }
         if (role === 'vendeur') await notifySellerInApp(user._id, 'sale_closed', 'Vente terminée', 'La vente de votre véhicule est maintenant clôturée.', sale, vehicle);
       } catch (error) {
         console.error(`Notification de clôture impossible (${role}) : ${error.message}`);
@@ -2138,18 +2159,20 @@ const relistSuspendedVehicle = async ({ saleId, sellerId }) => {
 };
 
 /**
- * Prévenir l'utilisateur (vendeur ou acheteur) que le document est prêt à être signé via OpenAPI
+ * Étape 3.3 : inviter la partie qui a validé les documents en premier à venir les signer,
+ * maintenant que l'autre partie les a validés à son tour.
  */
-const notifySignatureReady = async (user, signatureUrl, vehicle, sale, isSeller = false) => {
+const notifySignatureReady = async (user, side, signatureUrl, vehicle, sale) => {
   try {
     const email = emailTemplates.signatureReadyEmail({
       user,
+      side,
       brand: vehicle?.brand || '',
       model: vehicle?.model || '',
       signatureUrl,
     });
     await sendEmail({ to: user.email, subject: email.subject, text: email.text, html: email.html });
-    if (isSeller) await notifySellerInApp(user._id, 'signature_ready', 'Document prêt à signer', 'Votre document est prêt pour la signature électronique.', sale, vehicle);
+    if (side === 'seller') await notifySellerInApp(user._id, 'signature_ready', 'Documents à signer', 'L’acheteur a validé les documents : vous pouvez les signer.', sale, vehicle);
   } catch (error) {
     console.error(`Notification de signature OpenAPI impossible pour ${user.email} : ${error.message}`);
   }
@@ -2177,8 +2200,8 @@ const loadPartySale = async (saleId, userId, step, stepMessage) => {
 const notifyDocumentsEvent = async (sale, kind, recipients, extra = {}) => {
   try {
     const [seller, buyer, vehicle] = await Promise.all([
-      User.findById(sale.seller).select('email firstName lastName language role stampUrl').lean(),
-      User.findById(sale.winner).select('email firstName lastName language role stampUrl').lean(),
+      User.findById(sale.seller).select('email firstName lastName language role').lean(),
+      User.findById(sale.winner).select('email firstName lastName language role').lean(),
       VehicleDossier.findById(sale.vehicle).select('brand model').lean(),
     ]);
     const users = { seller, buyer };
@@ -2192,7 +2215,6 @@ const notifyDocumentsEvent = async (sale, kind, recipients, extra = {}) => {
         brand: vehicle?.brand || '',
         model: vehicle?.model || '',
         saleId: String(sale._id),
-        stampMissing: !user.stampUrl,
         ...extra,
       });
       try {
@@ -2220,8 +2242,6 @@ const confirmTransferReceived = async ({ saleId, sellerId }) => {
   sale.transferConfirmedAt = new Date();
   enterStep(sale, STEP.PREPARATION, null);
   await sale.save();
-
-  await notifyDocumentsEvent(sale, 'preparation', ['seller', 'buyer']);
   return sale;
 };
 
@@ -2265,7 +2285,13 @@ const submitRegistrationCard = async ({ saleId, sellerId, formulaNumber, registr
   enterStep(sale, STEP.VERIFICATION, null);
   await sale.save();
 
-  await prepareSaleDocuments(sale._id);
+  // L'acheteur est invité à vérifier les documents s'ils sont prêts ; sinon, s'il lui manque son
+  // tampon, à le déposer. Si c'est le tampon du vendeur qui manque, il voit la bannière à l'écran.
+  const generated = await prepareSaleDocuments(sale._id, { triggeredBy: 'seller' });
+  if (!generated) {
+    const buyer = await User.findById(sale.winner).select('stampUrl').lean();
+    if (!buyer?.stampUrl) await notifyDocumentsEvent(sale, 'stamp_needed', ['buyer']);
+  }
   return Sale.findById(sale._id);
 };
 
@@ -2273,9 +2299,11 @@ const submitRegistrationCard = async ({ saleId, sellerId, formulaNumber, registr
  * Étape 3.2 : génère le certificat de cession et la déclaration d'achat, remplis et tamponnés
  * par les deux parties, dès que leurs deux tampons existent. Appelée après la saisie de la
  * carte grise, à chaque dépôt de tampon, et par la tâche de fond en filet de sécurité.
+ * `triggeredBy` : partie dont l'action a débloqué la génération ; seule l'autre est prévenue par
+ * e-mail (celle qui agit est déjà sur la vente). Sans elle (tâche de fond), les deux le sont.
  * Renvoie true quand les documents viennent d'être générés.
  */
-const prepareSaleDocuments = async (saleId) => {
+const prepareSaleDocuments = async (saleId, { triggeredBy } = {}) => {
   const sale = await Sale.findById(saleId).lean();
   if (!sale || sale.status !== 'en_cours' || sale.currentStep !== STEP.VERIFICATION) return false;
   if ((sale.documentsReview?.version || 0) > 0) return false;
@@ -2325,7 +2353,8 @@ const prepareSaleDocuments = async (saleId) => {
   );
   if (result.modifiedCount !== 1) return false;
 
-  await notifyDocumentsEvent(sale, 'ready', ['seller', 'buyer']);
+  const recipients = triggeredBy ? [triggeredBy === 'seller' ? 'buyer' : 'seller'] : ['seller', 'buyer'];
+  await notifyDocumentsEvent(sale, 'ready', recipients);
   return true;
 };
 
@@ -2336,11 +2365,11 @@ const prepareDocumentsForUser = async (userId) => {
     currentStep: STEP.VERIFICATION,
     'documentsReview.version': { $in: [0, null] },
     $or: [{ seller: userId }, { winner: userId }],
-  }).select('_id').lean();
+  }).select('_id seller').lean();
 
   for (const sale of sales) {
     try {
-      await prepareSaleDocuments(sale._id);
+      await prepareSaleDocuments(sale._id, { triggeredBy: String(sale.seller) === String(userId) ? 'seller' : 'buyer' });
     } catch (error) {
       console.error(`Génération des documents impossible (vente ${sale._id}) : ${error.message}`);
     }
@@ -2516,8 +2545,13 @@ const startSignature = async (saleId) => {
     },
   });
 
-  if (sellerUrl) await notifySignatureReady(seller, sellerUrl, vehicle, lease, true);
-  if (buyerUrl) await notifySignatureReady(buyer, buyerUrl, vehicle, lease, false);
+  // Le second à valider est sur la vente et y trouve le bouton de signature : seul le premier,
+  // qui attendait l'autre partie, est invité par e-mail à venir signer.
+  const sellerDecidedAt = lease.documentsReview?.seller?.decidedAt;
+  const buyerDecidedAt = lease.documentsReview?.buyer?.decidedAt;
+  const firstValidator = sellerDecidedAt && buyerDecidedAt && buyerDecidedAt < sellerDecidedAt ? 'buyer' : 'seller';
+  if (firstValidator === 'seller' && sellerUrl) await notifySignatureReady(seller, 'seller', sellerUrl, vehicle, lease);
+  if (firstValidator === 'buyer' && buyerUrl) await notifySignatureReady(buyer, 'buyer', buyerUrl, vehicle, lease);
   return session.id;
 };
 
@@ -2834,33 +2868,15 @@ const finalizeSignature = async (saleId, signatureId) => {
 };
 
 /**
- * Le premier qui signe voit OpenAPI afficher « en attente des autres signataires » et ne sait
- * plus s'il doit attendre : on lui confirme que sa part est faite, et on prévient l'autre partie
- * que c'est à son tour.
+ * Première signature : aucun e-mail. Le premier signataire le sera à la clôture, et le second
+ * a déjà été invité à signer (ou est sur la vente). Le vendeur garde une notification interne
+ * quand c'est l'acheteur qui a signé en premier.
  */
 const notifyFirstSignature = async (sale, signedSide) => {
+  if (signedSide !== 'buyer') return;
   try {
-    const [seller, buyer, vehicle] = await Promise.all([
-      User.findById(sale.seller).select('email firstName lastName language role').lean(),
-      User.findById(sale.winner).select('email firstName lastName language role').lean(),
-      VehicleDossier.findById(sale.vehicle).select('brand model').lean(),
-    ]);
-    const common = { brand: vehicle?.brand || '', model: vehicle?.model || '', saleId: String(sale._id) };
-    const signer = signedSide === 'seller' ? seller : buyer;
-    const other = signedSide === 'seller' ? buyer : seller;
-    const otherSide = signedSide === 'seller' ? 'buyer' : 'seller';
-
-    if (signer) {
-      const email = emailTemplates.signatureRecordedEmail({ user: signer, side: signedSide, ...common });
-      await sendEmail({ to: signer.email, subject: email.subject, text: email.text, html: email.html });
-    }
-    if (other) {
-      const email = emailTemplates.signatureYourTurnEmail({ user: other, side: otherSide, ...common });
-      await sendEmail({ to: other.email, subject: email.subject, text: email.text, html: email.html });
-    }
-    if (otherSide === 'seller' && seller) {
-      await notifySellerInApp(seller._id, 'signature_your_turn', 'À vous de signer', 'L’acheteur a signé les documents. Il ne manque plus que votre signature.', sale, vehicle);
-    }
+    const vehicle = await VehicleDossier.findById(sale.vehicle).select('brand model').lean();
+    await notifySellerInApp(sale.seller, 'signature_your_turn', 'À vous de signer', 'L’acheteur a signé les documents. Il ne manque plus que votre signature.', sale, vehicle);
   } catch (error) {
     console.error(`Notification de première signature impossible (vente ${sale._id}) : ${error.message}`);
   }
@@ -2868,7 +2884,7 @@ const notifyFirstSignature = async (sale, signedSide) => {
 
 /**
  * Relit l'avancement de la signature électronique (étape 3.3) sur OpenAPI : enregistre qui a déjà
- * signé, prévient les parties à la première signature, et finalise la vente dès que les deux
+ * signé, garde la trace de la première signature, et finalise la vente dès que les deux
  * ont signé.
  */
 const refreshSignatureProgress = async (saleId) => {
