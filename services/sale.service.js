@@ -14,7 +14,18 @@ const { fillPurchaseDeclaration } = require('./purchaseDeclaration.service');
 const { saveBuffer } = require('./storage.service');
 const { generateBonEnlevement } = require('./handoverDocument.service');
 const { createSignatureSession, fetchSignedDocument, fetchAuditTrail, fetchSignatureProgress } = require('./esignature.service');
-const { stampSignedBundle } = require('./signedDocumentStamp.service');
+
+// Numéros des étapes de PURCHASE_STEPS (sale.model.js). Les étapes 3 à 5 sont présentées aux
+// utilisateurs comme 3.1, 3.2 et 3.3 de l'étape « Documents administratifs ».
+const STEP = { COMMISSION: 1, VIREMENT: 2, PREPARATION: 3, VERIFICATION: 4, SIGNATURE: 5 };
+
+const saleError = (message, codeName, statusCode) => {
+  const err = new Error(message);
+  err.codeName = codeName;
+  if (statusCode) err.statusCode = statusCode;
+  return err;
+};
+const saleDocuments = require('./saleDocuments.service');
 const { isStripeConfigured } = require('../config/stripe');
 
 const CLOSED_SESSION_STATUSES = ['closed', 'cloturee'];
@@ -590,12 +601,18 @@ const notifySellerReattributionExhausted = async (sale, suspended = false, selle
 };
 
 /**
- * Les traces de paiement appartiennent au gagnant précédent. Les conserver empêcherait le
- * nouveau gagnant de payer et pourrait permettre à une ancienne session Stripe encore en
- * attente d'être réconciliée sur cette nouvelle attribution — y compris quand le vendeur
- * choisit à nouveau le même acheteur, dont la première tentative avait échoué.
+ * Les traces de la procédure appartiennent au gagnant précédent. Conserver celles du paiement
+ * empêcherait le nouveau gagnant de payer et pourrait permettre à une ancienne session Stripe
+ * encore en attente d'être réconciliée sur cette nouvelle attribution — y compris quand le
+ * vendeur choisit à nouveau le même acheteur, dont la première tentative avait échoué. Les
+ * documents et la signature, établis au nom de l'ancien acheteur, sont refaits pour le nouveau.
  */
-const resetCommissionPayment = (sale) => {
+const resetPurchaseProgress = (sale) => {
+  sale.registrationCardSubmittedAt = null;
+  sale.certificate = undefined;
+  sale.purchaseDeclaration = undefined;
+  sale.documentsReview = { version: 0, correctionOpen: false, seller: null, buyer: null, history: [] };
+  sale.esignature = undefined;
   sale.commissionPaidAt = null;
   sale.documentsDelivery = null;
   sale.transferConfirmedAt = null;
@@ -680,7 +697,7 @@ const promoteNextBidder = async (saleId, reason = 'delai_depasse') => {
   sale.amount = next.amount;
   sale.sellerDecisionDueAt = null;
 
-  resetCommissionPayment(sale);
+  resetPurchaseProgress(sale);
   const deadlineHours = await startPurchaseProcedure(sale);
   await sale.save();
 
@@ -739,7 +756,35 @@ const serializeEsignature = (esignature, side) => {
   return side === 'seller' ? { ...rest, sellerUrl } : { ...rest, buyerUrl };
 };
 
-const serializeSale = (sale) => {
+// Étape 3 vue par l'une des parties : documents courants, avis des deux parties et présence des
+// tampons. Les deux parties voient exactement la même chose.
+const serializeDocuments = (sale, stamps = {}) => {
+  const document = (doc) => (doc?.url ? {
+    url: doc.url,
+    source: doc.source || 'generated',
+    updatedAt: doc.updatedAt || doc.generatedAt || null,
+  } : null);
+  const decision = (review) => (review?.decision ? {
+    decision: review.decision,
+    reason: review.reason || null,
+    comment: review.comment || null,
+    decidedAt: review.decidedAt || null,
+  } : null);
+  return {
+    registrationCardSubmittedAt: sale.registrationCardSubmittedAt || null,
+    stamps: { seller: Boolean(stamps.seller), buyer: Boolean(stamps.buyer) },
+    certificate: document(sale.certificate),
+    purchaseDeclaration: document(sale.purchaseDeclaration),
+    review: {
+      version: sale.documentsReview?.version || 0,
+      correctionOpen: Boolean(sale.documentsReview?.correctionOpen),
+      seller: decision(sale.documentsReview?.seller),
+      buyer: decision(sale.documentsReview?.buyer),
+    },
+  };
+};
+
+const serializeSale = (sale, stamps) => {
   const vehicle = sale.vehicle;
   const coverPhoto = vehicle && ((vehicle.photos || []).find((photo) => photo.isCover) || vehicle.photos?.[0]);
 
@@ -758,31 +803,11 @@ const serializeSale = (sale) => {
     // Étape 2 terminée : date à laquelle le vendeur a confirmé avoir reçu le virement
     transferConfirmedAt: sale.transferConfirmedAt || null,
     esignature: serializeEsignature(sale.esignature, 'buyer'),
-    certificate: {
-      url: sale.certificate?.url || null,
-      generatedAt: sale.certificate?.generatedAt || null,
-      sellerSignedUrl: sale.certificate?.sellerSignedUrl || null,
-      sellerSignedAt: sale.certificate?.sellerSignedAt || null,
-      signedUrl: sale.certificate?.signedUrl || null,
-      signedAt: sale.certificate?.signedAt || null,
-      validatedAt: sale.certificate?.validatedAt || null,
-      lastRejection: (sale.certificate?.rejections || []).at(-1) || null,
-      rejectionCount: (sale.certificate?.rejections || []).length,
-    },
-    purchaseDeclaration: {
-      url: sale.purchaseDeclaration?.url || null,
-      generatedAt: sale.purchaseDeclaration?.generatedAt || null,
-    },
+    documents: serializeDocuments(sale, stamps),
+    pendingAction: pendingActionFor(sale, 'buyer', Boolean(stamps?.buyer)),
     bonEnlevement: {
       url: sale.bonEnlevement?.url || null,
       generatedAt: sale.bonEnlevement?.generatedAt || null,
-    },
-    // L'acheteur détient le code : c'est lui qui le communique au vendeur à l'enlèvement
-    handover: {
-      declarationUrl: sale.handover?.declarationUrl || null,
-      generatedAt: sale.handover?.generatedAt || null,
-      otp: sale.handover?.otp || null,
-      confirmedAt: sale.handover?.confirmedAt || null,
     },
     wonAt: sale.wonAt || null,
     closedAt: sale.closedAt || null,
@@ -824,14 +849,21 @@ const serializeSale = (sale) => {
  * Ventes remportées par un acheteur, séparées en procédures en cours et ventes clôturées.
  */
 const listBuyerSales = async (buyerId) => {
-  const sales = await Sale.find({ winner: buyerId, status: { $in: ['en_cours', 'cloturee'] } })
-    .populate('vehicle', 'brand model year mileage registrationNumber photos')
-    .populate('session', 'name endDate')
-    .populate('winningOffer', 'fees')
-    .sort({ wonAt: -1, createdAt: -1 })
-    .lean();
+  const [sales, buyer] = await Promise.all([
+    Sale.find({ winner: buyerId, status: { $in: ['en_cours', 'cloturee'] } })
+      .populate('vehicle', 'brand model year mileage registrationNumber photos')
+      .populate('session', 'name endDate')
+      .populate('winningOffer', 'fees')
+      .populate('seller', 'stampUrl')
+      .sort({ wonAt: -1, createdAt: -1 })
+      .lean(),
+    User.findById(buyerId).select('stampUrl').lean(),
+  ]);
 
-  const serialized = sales.map(serializeSale);
+  const serialized = sales.map((sale) => serializeSale(sale, {
+    seller: Boolean(sale.seller?.stampUrl),
+    buyer: Boolean(buyer?.stampUrl),
+  }));
   return {
     ongoing: serialized.filter((sale) => sale.status === 'en_cours'),
     closed: serialized.filter((sale) => sale.status === 'cloturee'),
@@ -854,7 +886,7 @@ const getBuyerSale = async (saleId, buyerId) => {
     .populate('vehicle', 'brand model year mileage photos registrationNumber')
     .populate('session', 'name endDate')
     .populate('winningOffer', 'fees')
-    .populate('seller', 'companyName firstName lastName phone email address bankInfo')
+    .populate('seller', 'companyName firstName lastName phone email address bankInfo stampUrl')
     .lean();
 
   if (!sale) {
@@ -864,7 +896,8 @@ const getBuyerSale = async (saleId, buyerId) => {
     throw err;
   }
 
-  return serializeSale(sale);
+  const buyer = await User.findById(buyerId).select('stampUrl').lean();
+  return serializeSale(sale, { seller: Boolean(sale.seller?.stampUrl), buyer: Boolean(buyer?.stampUrl) });
 };
 
 /**
@@ -1229,18 +1262,30 @@ const reconcilePendingCommissionPayments = async () => {
   }
 };
 
-// Parts du délai écoulé déclenchant un rappel à l'acheteur
 /**
- * Étapes dont l'avancement dépend d'une action du VENDEUR. Les autres attendent l'acheteur
- * ou la plateforme. Cette liste vit ici, à côté de PURCHASE_STEPS : l'interface ne doit pas
- * réinterpréter la sémantique des étapes.
- *
- *   virement            le vendeur confirme avoir reçu le virement
- *   validation_vendeur  le vendeur valide le certificat déposé par l'acheteur
- *   enlevement          le vendeur saisit le code remis par l'acheteur
+ * Action attendue d'une partie sur une vente en cours, ou null quand elle attend l'autre partie.
+ * Alimente les pastilles « à traiter » des listes et tableaux de bord : l'interface ne
+ * réinterprète pas la sémantique des étapes. `hasStamp` : la partie a déposé son tampon.
  */
-const SELLER_ACTION_STEPS = ['virement_carte_grise', 'signature_electronique', 'tampon_vendeur', 'validation_vendeur', 'enlevement'];
+const pendingActionFor = (sale, side, hasStamp) => {
+  if (sale.status !== 'en_cours') return null;
+  const review = sale.documentsReview;
+  switch (sale.currentStep) {
+    case STEP.COMMISSION: return side === 'buyer' ? 'pay_commission' : null;
+    case STEP.VIREMENT: return side === 'seller' ? 'confirm_transfer' : null;
+    case STEP.PREPARATION:
+      if (side === 'seller' && !sale.registrationCardSubmittedAt) return 'registration_card';
+      return hasStamp ? null : 'upload_stamp';
+    case STEP.VERIFICATION:
+      if (!((review?.version || 0) > 0)) return hasStamp ? null : 'upload_stamp';
+      return review?.[side]?.decision === 'valide' ? null : 'review_documents';
+    case STEP.SIGNATURE:
+      return sale.esignature?.[`${side}SignedAt`] ? null : 'sign';
+    default: return null;
+  }
+};
 
+// Parts du délai écoulé déclenchant un rappel à l'acheteur
 const REMINDER_THRESHOLDS = [50, 80];
 
 /**
@@ -1530,6 +1575,7 @@ const phaseOfState = (state) => Object.keys(SELLER_PHASES).find((phase) => SELLE
  * invendu puis republié possède plusieurs ventes ; seule la dernière décrit sa situation.
  */
 const listSellerVehicles = async (sellerId) => {
+  const sellerHasStamp = Boolean((await User.findById(sellerId).select('stampUrl').lean())?.stampUrl);
   const [vehicles, sales] = await Promise.all([
     // Tous les dossiers, pas seulement les validés : la phase 1 vit précisément dans les
     // statuts amont (soumis, correction demandée, refusé).
@@ -1538,7 +1584,7 @@ const listSellerVehicles = async (sellerId) => {
       .sort({ updatedAt: -1 })
       .lean(),
     Sale.find({ seller: sellerId })
-      .select('vehicle session status amount currentStep wonAt closedAt createdAt sellerDecisionDueAt waitingList')
+      .select('vehicle session status amount currentStep wonAt closedAt createdAt sellerDecisionDueAt waitingList registrationCardSubmittedAt documentsReview esignature.sellerSignedAt')
       .sort({ createdAt: -1 })
       .lean(),
   ]);
@@ -1639,6 +1685,7 @@ const listSellerVehicles = async (sellerId) => {
         currentStep: sale.status === 'en_cours' ? sale.currentStep : null,
         stepKey: sale.status === 'en_cours' ? (Sale.PURCHASE_STEPS[sale.currentStep - 1] || null) : null,
         stepCount: Sale.PURCHASE_STEPS.length,
+        pendingAction: pendingActionFor(sale, 'seller', sellerHasStamp),
         wonAt: sale.wonAt || null,
         closedAt: sale.closedAt || null,
         sellerDecisionDueAt: sale.sellerDecisionDueAt || null,
@@ -1657,6 +1704,7 @@ const listSellerVehicles = async (sellerId) => {
 };
 
 const listSellerSales = async (sellerId) => {
+  const sellerHasStamp = Boolean((await User.findById(sellerId).select('stampUrl').lean())?.stampUrl);
   const [sales, liveVehicles] = await Promise.all([
     Sale.find({ seller: sellerId })
       .populate('vehicle', 'brand model photos listingCount reservePrice registrationNumber')
@@ -1757,8 +1805,8 @@ const listSellerSales = async (sellerId) => {
       stepCount: Sale.PURCHASE_STEPS.length,
       // Vrai quand la vente est bloquée en attente d'une action du vendeur : c'est ce qui
       // doit remonter en tête de son tableau de bord.
-      awaitingSeller: sale.status === 'en_cours'
-        && SELLER_ACTION_STEPS.includes(Sale.PURCHASE_STEPS[sale.currentStep - 1]),
+      pendingAction: pendingActionFor(sale, 'seller', sellerHasStamp),
+      awaitingSeller: Boolean(pendingActionFor(sale, 'seller', sellerHasStamp)),
       wonAt: sale.wonAt || null,
       closedAt: sale.closedAt || null,
       listingCount: vehicle?.listingCount ?? 0,
@@ -1787,195 +1835,12 @@ const listSellerSales = async (sellerId) => {
 };
 
 /**
- * Prévenir le vendeur que le certificat signé attend sa vérification.
- */
-const notifySellerSignedCertificate = async (sale) => {
-  try {
-    const [seller, populated] = await Promise.all([
-      User.findById(sale.seller).select('email firstName lastName language role'),
-      Sale.findById(sale._id).populate('vehicle', 'brand model year photos').populate('session', 'name').lean(),
-    ]);
-    if (!seller) return;
-
-    const vehicle = populated?.vehicle;
-    const email = emailTemplates.saleSignedCertificateSellerEmail({
-      user: seller,
-      brand: vehicle?.brand || '',
-      model: vehicle?.model || '',
-      year: vehicle?.year || null,
-      photoUrl: coverUrl(vehicle),
-      sessionName: populated?.session?.name || '',
-      saleId: String(sale._id),
-    });
-
-    await sendEmail({ to: seller.email, subject: email.subject, text: email.text, html: email.html });
-    await notifySellerInApp(seller._id, 'signed_certificate_ready', 'Document signé à vérifier', 'Le certificat signé est disponible et attend votre vérification.', sale, vehicle);
-  } catch (error) {
-    console.error(`Notification du certificat signé impossible (vente ${sale._id}) : ${error.message}`);
-  }
-};
-
-/**
- * Prévenir l'acheteur et l'administration qu'un certificat a été refusé.
- * Les envois sont indépendants : un échec sur l'un n'empêche pas les autres.
- */
-const notifyCertificateRejected = async (sale, { reason, comment }) => {
-  try {
-    const [buyer, seller, config, populated] = await Promise.all([
-      User.findById(sale.winner).select('email firstName lastName language role companyName').lean(),
-      User.findById(sale.seller).select('companyName firstName lastName').lean(),
-      generalConfigService.getConfig(),
-      Sale.findById(sale._id).populate('vehicle', 'brand model year photos').populate('session', 'name').lean(),
-    ]);
-
-    const vehicle = populated?.vehicle;
-    const vehicleLabel = [vehicle?.brand, vehicle?.model].filter(Boolean).join(' ') || 'Véhicule';
-    const sessionName = populated?.session?.name || '';
-
-    if (buyer) {
-      const email = emailTemplates.saleCertificateRejectedBuyerEmail({
-        user: buyer,
-        brand: vehicle?.brand || '',
-        model: vehicle?.model || '',
-        year: vehicle?.year || null,
-        photoUrl: coverUrl(vehicle),
-        sessionName,
-        saleId: String(sale._id),
-        reason,
-        comment,
-      });
-      await sendEmail({ to: buyer.email, subject: email.subject, text: email.text, html: email.html })
-        .catch((error) => console.error(`Notification acheteur impossible : ${error.message}`));
-    }
-
-    const adminEmail = config?.adminEmail || 'contact@dealautopro.com';
-    const email = emailTemplates.saleCertificateRejectedAdminEmail({
-      user: { email: adminEmail, language: 'fr' },
-      vehicleLabel,
-      sessionName,
-      sellerName: seller?.companyName || `${seller?.firstName || ''} ${seller?.lastName || ''}`.trim(),
-      buyerName: buyer?.companyName || `${buyer?.firstName || ''} ${buyer?.lastName || ''}`.trim(),
-      reason,
-      comment,
-    });
-    await sendEmail({ to: adminEmail, subject: email.subject, text: email.text, html: email.html })
-      .catch((error) => console.error(`Notification admin impossible : ${error.message}`));
-
-    if (seller && buyer && vehicle) {
-      await notificationService.createAdminCertificateRejectedNotification(sale, vehicle, buyer, seller)
-        .catch((error) => console.error(`Création de notification in-app impossible : ${error.message}`));
-    }
-  } catch (error) {
-    console.error(`Notification de refus impossible (vente ${sale._id}) : ${error.message}`);
-  }
-};
-
-
-/**
- * Étape 4 : le vendeur refuse le certificat déposé. Le document écarté est archivé avec
- * son motif, et la vente revient à l'étape 3 pour que l'acheteur en redépose un conforme.
- */
-const rejectSignedCertificate = async ({ saleId, sellerId, reason, comment }) => {
-  if (!Sale.CERTIFICATE_REJECTION_REASONS.includes(reason)) {
-    const err = new Error('Choisissez un motif de refus.');
-    err.codeName = 'sale.invalid_rejection_reason';
-    throw err;
-  }
-  if (!mongoose.isValidObjectId(saleId)) {
-    const err = new Error('Vente introuvable.');
-    err.codeName = 'sale.not_found';
-    err.statusCode = 404;
-    throw err;
-  }
-
-  const sale = await Sale.findOne({ _id: saleId, seller: sellerId });
-  if (!sale) {
-    const err = new Error('Vente introuvable.');
-    err.codeName = 'sale.not_found';
-    err.statusCode = 404;
-    throw err;
-  }
-  if (sale.status !== 'en_cours') {
-    const err = new Error("Cette vente n'est plus en cours.");
-    err.codeName = 'sale.not_ongoing';
-    throw err;
-  }
-  if (sale.currentStep !== 7) {
-    const err = new Error("Cette vente n'est pas à l'étape de validation des documents.");
-    err.codeName = 'sale.step_mismatch';
-    throw err;
-  }
-  if (!sale.certificate?.signedUrl) {
-    const err = new Error("Aucun certificat signé n'a été déposé par l'acheteur.");
-    err.codeName = 'sale.certificate_missing';
-    throw err;
-  }
-
-  const current = sale.certificate.toObject?.() || sale.certificate;
-  const rejectionEntry = { url: current.signedUrl, rejectedBy: 'seller', reason, comment: comment || '', createdAt: new Date() };
-  sale.certificate = {
-    ...current,
-    // Le document écarté est archivé avec son motif, puis retiré pour forcer un nouveau dépôt
-    rejections: [
-      ...(current.rejections || []),
-      rejectionEntry,
-    ],
-    rejectionCount: (current.rejectionCount || 0) + 1,
-    lastRejection: rejectionEntry,
-    signedUrl: null,
-    signedFilename: null,
-    signedAt: null,
-  };
-  sale.esignature.buyerStampedUrl = null;
-  sale.esignature.buyerStampedFilename = null;
-  enterStep(sale, 6, null); // Retour au tampon acheteur pour un nouveau dépôt
-  await sale.save();
-
-  await notifyCertificateRejected(sale, { reason, comment });
-
-  return sale;
-};
-
-// Nombre maximal de saisies d'OTP erronées avant blocage de la remise
-const MAX_OTP_ATTEMPTS = 10;
-
-/**
  * Charger, pour une vente, de quoi composer un e-mail : véhicule et session.
  */
 const loadSaleContext = async (saleId) => Sale.findById(saleId)
   .populate('vehicle', 'brand model year photos')
   .populate('session', 'name')
   .lean();
-
-/**
- * Prévenir l'acheteur que la remise peut avoir lieu. Le code de remise n'est
- * délibérément pas mis dans l'e-mail : une boîte compromise ne doit pas suffire
- * à déclencher la clôture de la vente.
- */
-const notifyBuyerHandoverReady = async (sale) => {
-  try {
-    const [buyer, context] = await Promise.all([
-      User.findById(sale.winner).select('email firstName lastName language role'),
-      loadSaleContext(sale._id),
-    ]);
-    if (!buyer) return;
-
-    const vehicle = context?.vehicle;
-    const email = emailTemplates.saleHandoverReadyBuyerEmail({
-      user: buyer,
-      brand: vehicle?.brand || '',
-      model: vehicle?.model || '',
-      year: vehicle?.year || null,
-      photoUrl: coverUrl(vehicle),
-      sessionName: context?.session?.name || '',
-      saleId: String(sale._id),
-    });
-
-    await sendEmail({ to: buyer.email, subject: email.subject, text: email.text, html: email.html });
-  } catch (error) {
-    console.error(`Notification d'enlèvement impossible (vente ${sale._id}) : ${error.message}`);
-  }
-};
 
 /**
  * Confirmer la clôture aux deux parties, chacune avec le lien vers son propre espace.
@@ -2013,128 +1878,6 @@ const notifySaleClosed = async (sale) => {
   }
 };
 
-/** Préparer l'étape 8 en générant uniquement le bon d'enlèvement. */
-const prepareHandover = async (sale) => {
-  const [vehicle, seller, buyer] = await Promise.all([
-    VehicleDossier.findById(sale.vehicle)
-      .select('brand model year mileage vin registrationNumber vehicleAddress vehicleAddressDetails')
-      .lean(),
-    User.findById(sale.seller).select('firstName lastName companyName siret address phone').lean(),
-    User.findById(sale.winner).select('firstName lastName companyName siret address phone').lean(),
-  ]);
-  const bon = await generateBonEnlevement(sale, vehicle, seller, buyer);
-
-  sale.handover = {
-    ...(sale.handover?.toObject?.() || sale.handover || {}),
-    generatedAt: new Date(),
-    confirmedAt: null,
-  };
-  sale.bonEnlevement = {
-    url: bon.url,
-    filename: bon.filename,
-    generatedAt: new Date(),
-  };
-};
-
-/**
- * Étape 7 : le vendeur atteste
- * la remise du véhicule et clôture la vente.
- */
-const confirmHandover = async ({ saleId, sellerId }) => {
-  if (!mongoose.isValidObjectId(saleId)) {
-    const err = new Error('Vente introuvable.');
-    err.codeName = 'sale.not_found';
-    err.statusCode = 404;
-    throw err;
-  }
-
-  const sale = await Sale.findOne({ _id: saleId, seller: sellerId });
-  if (!sale) {
-    const err = new Error('Vente introuvable.');
-    err.codeName = 'sale.not_found';
-    err.statusCode = 404;
-    throw err;
-  }
-  if (sale.status !== 'en_cours') {
-    const err = new Error("Cette vente n'est plus en cours.");
-    err.codeName = 'sale.not_ongoing';
-    throw err;
-  }
-  if (sale.currentStep !== 8) {
-    const err = new Error("Cette vente n'est pas à l'étape de l'enlèvement.");
-    err.codeName = 'sale.step_mismatch';
-    throw err;
-  }
-
-  sale.handover.confirmedAt = new Date();
-  sale.status = 'cloturee';
-  sale.closedAt = new Date();
-  sale.currentStepDueAt = null;
-  sale.stepRemindersSent = [];
-  await sale.save();
-
-  await notifySaleClosed(sale);
-
-  return sale;
-};
-
-/**
- * Étape 4 : le vendeur atteste que le certificat déposé est bien signé et tamponné.
- * La vente passe alors à l'étape d'enlèvement.
- */
-const validateSignedCertificate = async ({ saleId, sellerId }) => {
-  if (!mongoose.isValidObjectId(saleId)) {
-    const err = new Error('Vente introuvable.');
-    err.codeName = 'sale.not_found';
-    err.statusCode = 404;
-    throw err;
-  }
-
-  const sale = await Sale.findOne({ _id: saleId, seller: sellerId });
-  if (!sale) {
-    const err = new Error('Vente introuvable.');
-    err.codeName = 'sale.not_found';
-    err.statusCode = 404;
-    throw err;
-  }
-  if (sale.status !== 'en_cours') {
-    const err = new Error("Cette vente n'est plus en cours.");
-    err.codeName = 'sale.not_ongoing';
-    throw err;
-  }
-  if (sale.currentStep !== 7) {
-    const err = new Error("Cette vente n'est pas à l'étape de validation des documents.");
-    err.codeName = 'sale.step_mismatch';
-    throw err;
-  }
-  if (!sale.certificate?.signedUrl) {
-    const err = new Error("Aucun certificat signé n'a été déposé par l'acheteur.");
-    err.codeName = 'sale.certificate_missing';
-    throw err;
-  }
-
-  sale.certificate = {
-    ...(sale.certificate?.toObject?.() || sale.certificate || {}),
-    validatedAt: new Date(),
-  };
-
-  // Le bon d'enlèvement doit exister avant d'ouvrir l'étape 8. En cas d'échec,
-  // la vente reste à l'étape 7 afin que l'opération puisse être relancée proprement.
-  await prepareHandover(sale);
-
-  const closedAt = new Date();
-  enterStep(sale, 8, null);
-  sale.status = 'cloturee';
-  sale.closedAt = closedAt;
-  sale.currentStepDueAt = null;
-  sale.stepRemindersSent = [];
-  await sale.save();
-
-  await notifySaleClosed(sale);
-
-  return sale;
-};
-
 /**
  * Détail d'une vente vue par son vendeur. Le filtre sur `seller` fait office de contrôle
  * d'accès. L'identité de l'acheteur n'est révélée qu'une fois la commission réglée : elle
@@ -2151,8 +1894,9 @@ const getSellerSale = async (saleId, sellerId) => {
   let sale = await Sale.findOne({ _id: saleId, seller: sellerId })
     .populate('vehicle', 'brand model year mileage photos listingCount registrationNumber registrationCardAvailable formulaNumber registrationCardMissingMotif')
     .populate('session', 'name endDate')
-    .populate('winner', 'companyName firstName lastName email phone address')
+    .populate('winner', 'companyName firstName lastName email phone address stampUrl')
     .lean();
+  const sellerStamp = await User.findById(sellerId).select('stampUrl').lean();
 
   // Une vente « sans gagnant » appartient à une session passée : si le véhicule a depuis été
   // republié dans une session encore ouverte, c'est cette mise en vente qui compte. On affiche
@@ -2228,29 +1972,13 @@ const getSellerSale = async (saleId, sellerId) => {
     documentsDelivery: sale.documentsDelivery || null,
     transferConfirmedAt: sale.transferConfirmedAt || null,
     esignature: serializeEsignature(sale.esignature, 'seller'),
-    certificate: {
-      url: sale.certificate?.url || null,
-      generatedAt: sale.certificate?.generatedAt || null,
-      signedUrl: sale.certificate?.signedUrl || null,
-      signedAt: sale.certificate?.signedAt || null,
-      validatedAt: sale.certificate?.validatedAt || null,
-      lastRejection: (sale.certificate?.rejections || []).at(-1) || null,
-      rejectionCount: (sale.certificate?.rejections || []).length,
-    },
-    purchaseDeclaration: {
-      url: sale.purchaseDeclaration?.url || null,
-      generatedAt: sale.purchaseDeclaration?.generatedAt || null,
-    },
+    documents: serializeDocuments(sale, {
+      seller: Boolean(sellerStamp?.stampUrl),
+      buyer: Boolean(sale.winner && typeof sale.winner === 'object' && sale.winner.stampUrl),
+    }),
     bonEnlevement: {
       url: sale.bonEnlevement?.url || null,
       generatedAt: sale.bonEnlevement?.generatedAt || null,
-    },
-    // L'OTP n'est jamais transmis au vendeur : il doit le tenir de l'acheteur.
-    // La déclaration ne lui est ouverte qu'une fois la remise confirmée.
-    handover: {
-      declarationUrl: sale.handover?.confirmedAt ? (sale.handover?.declarationUrl || null) : null,
-      confirmedAt: sale.handover?.confirmedAt || null,
-      otpAttempts: sale.handover?.otpAttempts || 0,
     },
     waitingCount: (sale.waitingList || []).length,
     wonAt: sale.wonAt || null,
@@ -2264,7 +1992,7 @@ const getSellerSale = async (saleId, sellerId) => {
       mileage: vehicle.mileage ?? null,
       registrationNumber: vehicle.registrationNumber || null,
       registrationCardAvailable: vehicle.registrationCardAvailable ?? true,
-      // Saisis par le vendeur à l'étape 2, réaffichés dans l'historique de cette étape
+      // Saisis par le vendeur à l'étape 3.1, réaffichés dans l'historique de cette étape
       formulaNumber: vehicle.formulaNumber || null,
       registrationCardMissingMotif: vehicle.registrationCardMissingMotif || null,
       photoUrl: coverUrl(vehicle),
@@ -2375,7 +2103,7 @@ const acceptSellerOffer = async ({ vehicleId, offerId, sellerId }) => {
   sale.amount = offer.amount;
   sale.sellerDecisionDueAt = null;
   // La vente peut être réutilisée après l'échec d'un précédent gagnant (liste d'attente épuisée)
-  resetCommissionPayment(sale);
+  resetPurchaseProgress(sale);
   const deadlineHours = await startPurchaseProcedure(sale);
   await sale.save();
 
@@ -2410,40 +2138,6 @@ const relistSuspendedVehicle = async ({ saleId, sellerId }) => {
 };
 
 /**
- * Générer le certificat de cession pré-rempli et l'attacher à la vente.
- * Les cachets déjà enregistrés par le vendeur et l'acheteur sont apposés pendant
- * la génération. Les signatures restent gérées par le parcours de signature.
- */
-const generateCertificate = async (sale) => {
-  const [vehicle, seller, buyer] = await Promise.all([
-    VehicleDossier.findById(sale.vehicle)
-      .select('brand model year mileage vin registrationNumber firstRegistrationDate vehicleGenre engine registrationCardAvailable formulaNumber registrationCardMissingMotif')
-      .lean(),
-    User.findById(sale.seller).select('firstName lastName email companyName siret address stampUrl language').lean(),
-    User.findById(sale.winner).select('firstName lastName email companyName siret address stampUrl language').lean(),
-  ]);
-
-  const pdf = await fillCertificateOfTransfer({
-    vehicle,
-    seller: { ...seller, stampUrl: null },
-    buyer: { ...buyer, stampUrl: null },
-    transferredAt: sale.transferConfirmedAt || new Date(),
-  });
-
-  const filename = `ventes/certificats/${sale._id}_certificat-cession.pdf`;
-  const stored = await saveBuffer({ buffer: pdf, filename, contentType: 'application/pdf' });
-
-  sale.certificate = {
-    ...(sale.certificate?.toObject?.() || sale.certificate || {}),
-    url: stored.url,
-    filename: stored.filename,
-    generatedAt: new Date(),
-  };
-
-  return { vehicle, buyer, seller, buffer: pdf };
-};
-
-/**
  * Prévenir l'utilisateur (vendeur ou acheteur) que le document est prêt à être signé via OpenAPI
  */
 const notifySignatureReady = async (user, signatureUrl, vehicle, sale, isSeller = false) => {
@@ -2461,135 +2155,90 @@ const notifySignatureReady = async (user, signatureUrl, vehicle, sale, isSeller 
   }
 };
 
-/** Notifier la personne qui doit agir juste après la fin de la signature électronique. */
-const notifyPostSignatureAction = async (sale, sellerStampApplied) => {
-  try {
-    const [seller, buyer, vehicle, session] = await Promise.all([
-      User.findById(sale.seller).select('email firstName lastName language role').lean(),
-      User.findById(sale.winner).select('email firstName lastName language role').lean(),
-      VehicleDossier.findById(sale.vehicle).select('brand model').lean(),
-      Session.findById(sale.session).select('name').lean(),
-    ]);
-    const common = {
-      brand: vehicle?.brand || '',
-      model: vehicle?.model || '',
-      sessionName: session?.name || '',
-      saleId: String(sale._id),
-    };
+/**
+ * Charge une vente en cours dont l'utilisateur est le vendeur ou l'acheteur, à l'étape attendue.
+ * Le filtre sur les parties fait office de contrôle d'accès.
+ */
+const loadPartySale = async (saleId, userId, step, stepMessage) => {
+  const sale = mongoose.isValidObjectId(saleId)
+    ? await Sale.findOne({ _id: saleId, $or: [{ seller: userId }, { winner: userId }] })
+    : null;
+  if (!sale) throw saleError('Vente introuvable.', 'sale.not_found', 404);
+  if (sale.status !== 'en_cours') throw saleError("Cette vente n'est plus en cours.", 'sale.not_ongoing', 409);
+  if (sale.currentStep !== step) throw saleError(stepMessage, 'sale.step_mismatch', 409);
+  return { sale, side: String(sale.seller) === String(userId) ? 'seller' : 'buyer' };
+};
 
-    if (sellerStampApplied && buyer) {
-      const email = emailTemplates.buyerSellerStampValidationEmail({ user: buyer, ...common });
-      await sendEmail({ to: buyer.email, subject: email.subject, text: email.text, html: email.html });
-    } else if (!sellerStampApplied && seller) {
-      const email = emailTemplates.sellerStampRequiredEmail({ user: seller, ...common });
-      await sendEmail({ to: seller.email, subject: email.subject, text: email.text, html: email.html });
-      await notifySellerInApp(seller._id, 'seller_stamp_required', 'Tampon vendeur requis', 'Le document signé est prêt. Ajoutez votre tampon pour poursuivre la vente.', sale, vehicle);
+/**
+ * Prévenir les parties d'un événement de l'étape 3 (documents administratifs). Chaque
+ * destinataire reçoit un e-mail, et le vendeur une notification dans son espace.
+ * `recipients` : côtés à prévenir ('seller', 'buyer').
+ */
+const notifyDocumentsEvent = async (sale, kind, recipients, extra = {}) => {
+  try {
+    const [seller, buyer, vehicle] = await Promise.all([
+      User.findById(sale.seller).select('email firstName lastName language role stampUrl').lean(),
+      User.findById(sale.winner).select('email firstName lastName language role stampUrl').lean(),
+      VehicleDossier.findById(sale.vehicle).select('brand model').lean(),
+    ]);
+    const users = { seller, buyer };
+    for (const side of recipients) {
+      const user = users[side];
+      if (!user) continue;
+      const email = emailTemplates.saleDocumentsEmail({
+        user,
+        side,
+        kind,
+        brand: vehicle?.brand || '',
+        model: vehicle?.model || '',
+        saleId: String(sale._id),
+        stampMissing: !user.stampUrl,
+        ...extra,
+      });
+      try {
+        await sendEmail({ to: user.email, subject: email.subject, text: email.text, html: email.html });
+      } catch (error) {
+        console.error(`E-mail « ${kind} » impossible (${side}, vente ${sale._id}) : ${error.message}`);
+      }
+      if (side === 'seller') {
+        await notifySellerInApp(user._id, `documents_${kind}`, email.inAppTitle, email.inAppMessage, sale, vehicle);
+      }
     }
   } catch (error) {
-    // La signature et le changement d'étape restent acquis même si le service mail est indisponible.
-    console.error(`Notification post-signature impossible (vente ${sale._id}) : ${error.message}`);
+    console.error(`Notification « ${kind} » impossible (vente ${sale._id}) : ${error.message}`);
   }
 };
 
 /**
  * Étape 2 : le virement est réalisé de banque à banque, hors plateforme. Seul le vendeur
- * peut attester l'avoir reçu ; sa confirmation ouvre l'état intermédiaire 2,5.
+ * peut attester l'avoir reçu ; sa confirmation ouvre l'étape 3.1 (carte grise et tampons).
  */
 const confirmTransferReceived = async ({ saleId, sellerId }) => {
-  if (!mongoose.isValidObjectId(saleId)) {
-    const err = new Error('Vente introuvable.');
-    err.codeName = 'sale.not_found';
-    err.statusCode = 404;
-    throw err;
-  }
+  const { sale, side } = await loadPartySale(saleId, sellerId, STEP.VIREMENT, "Cette vente n'est pas à l'étape du virement.");
+  if (side !== 'seller') throw saleError('Vente introuvable.', 'sale.not_found', 404);
 
-  const sale = await Sale.findOne({ _id: saleId, seller: sellerId });
-  if (!sale) {
-    const err = new Error('Vente introuvable.');
-    err.codeName = 'sale.not_found';
-    err.statusCode = 404;
-    throw err;
-  }
-  if (sale.status !== 'en_cours') {
-    const err = new Error("Cette vente n'est plus en cours.");
-    err.codeName = 'sale.not_ongoing';
-    throw err;
-  }
-  if (sale.currentStep !== 2) {
-    const err = new Error("Cette vente n'est pas à l'étape du virement.");
-    err.codeName = 'sale.step_mismatch';
-    throw err;
-  }
+  sale.transferConfirmedAt = new Date();
+  enterStep(sale, STEP.PREPARATION, null);
+  await sale.save();
 
-  // État intermédiaire 2,5 : le virement est confirmé, mais la vente reste à l'étape 2
-  // tant que les données carte grise n'ont pas été collectées et les documents générés.
-  if (!sale.transferConfirmedAt) {
-    sale.transferConfirmedAt = new Date();
-    await sale.save();
-  }
+  await notifyDocumentsEvent(sale, 'preparation', ['seller', 'buyer']);
   return sale;
 };
 
-
-const generatePurchaseDeclarationDoc = async (sale, vehicle, seller, buyer) => {
-  const pdf = await fillPurchaseDeclaration({
-    vehicle,
-    seller: { ...seller, stampUrl: null },
-    buyer: { ...buyer, stampUrl: null },
-    purchasedAt: sale.transferConfirmedAt || new Date(),
-  });
-
-  const filename = `ventes/declarations/${sale._id}_declaration-achat.pdf`;
-  const stored = await saveBuffer({ buffer: pdf, filename, contentType: 'application/pdf' });
-
-  sale.purchaseDeclaration = {
-    ...(sale.purchaseDeclaration?.toObject?.() || sale.purchaseDeclaration || {}),
-    url: stored.url,
-    filename: stored.filename,
-    generatedAt: new Date(),
-  };
-
-  return { buffer: pdf, ...stored };
-};
-
-const processRegistrationCard = async ({ saleId, sellerId, formulaNumber, registrationCardMissingMotif }) => {
-  if (!mongoose.isValidObjectId(saleId)) {
-    const err = new Error('Vente introuvable.');
-    err.codeName = 'sale.not_found';
-    err.statusCode = 404;
-    throw err;
-  }
-
-  const sale = await Sale.findOne({ _id: saleId, seller: sellerId });
-  if (!sale) {
-    const err = new Error('Vente introuvable.');
-    err.codeName = 'sale.not_found';
-    err.statusCode = 404;
-    throw err;
-  }
-  if (sale.status !== 'en_cours' || sale.currentStep !== 2) {
-    const err = new Error("Cette vente n'est plus à l'étape du virement.");
-    err.codeName = 'sale.step_mismatch';
-    throw err;
-  }
-  if (!sale.transferConfirmedAt) {
-    const err = new Error("La réception du virement doit être confirmée avant le traitement de la carte grise.");
-    err.codeName = 'sale.transfer_not_confirmed';
-    err.statusCode = 400;
-    throw err;
-  }
+/**
+ * Étape 3.1 : le vendeur complète les données de la carte grise. La vente passe à la
+ * vérification (3.2), où les documents sont générés dès que les deux tampons existent.
+ */
+const submitRegistrationCard = async ({ saleId, sellerId, formulaNumber, registrationCardMissingMotif }) => {
+  const { sale, side } = await loadPartySale(saleId, sellerId, STEP.PREPARATION, "Cette vente n'est pas à l'étape de la carte grise.");
+  if (side !== 'seller') throw saleError('Vente introuvable.', 'sale.not_found', 404);
 
   const vehicle = await VehicleDossier.findById(sale.vehicle).select('registrationCardAvailable');
-  if (!vehicle) {
-    const err = new Error('Dossier du véhicule introuvable.');
-    err.codeName = 'vehicle_dossier.not_found';
-    err.statusCode = 404;
-    throw err;
-  }
+  if (!vehicle) throw saleError('Dossier du véhicule introuvable.', 'vehicle_dossier.not_found', 404);
 
   const rawFormulaNumber = typeof formulaNumber === 'string' ? formulaNumber.trim() : '';
-  // Le modal affiche déjà le préfixe « 20 ». Accepte aussi les anciens clients qui
-  // n'envoient que la suite et persiste toujours le numéro complet dans le dossier.
+  // Le modal affiche déjà le préfixe « 20 ». Accepte aussi les clients qui n'envoient que
+  // la suite et persiste toujours le numéro complet dans le dossier.
   const normalizedFormulaNumber = rawFormulaNumber && !rawFormulaNumber.startsWith('20')
     ? `20${rawFormulaNumber}`
     : rawFormulaNumber;
@@ -2597,23 +2246,14 @@ const processRegistrationCard = async ({ saleId, sellerId, formulaNumber, regist
     ? registrationCardMissingMotif.trim()
     : '';
 
+  if (vehicle.registrationCardAvailable == null) {
+    throw saleError("La disponibilité de la carte grise n'est pas renseignée dans le dossier du véhicule.", 'sale.registration_card_status_required', 400);
+  }
   if (vehicle.registrationCardAvailable === true && !normalizedFormulaNumber) {
-    const err = new Error('Le numéro de formule de la carte grise est obligatoire.');
-    err.codeName = 'sale.formula_number_required';
-    err.statusCode = 400;
-    throw err;
+    throw saleError('Le numéro de formule de la carte grise est obligatoire.', 'sale.formula_number_required', 400);
   }
   if (vehicle.registrationCardAvailable === false && !normalizedMissingMotif) {
-    const err = new Error("Le motif d'absence de carte grise est obligatoire.");
-    err.codeName = 'sale.registration_card_missing_motif_required';
-    err.statusCode = 400;
-    throw err;
-  }
-  if (vehicle.registrationCardAvailable == null) {
-    const err = new Error("La disponibilité de la carte grise n'est pas renseignée dans le dossier du véhicule.");
-    err.codeName = 'sale.registration_card_status_required';
-    err.statusCode = 400;
-    throw err;
+    throw saleError("Le motif d'absence de carte grise est obligatoire.", 'sale.registration_card_missing_motif_required', 400);
   }
 
   const registrationCardUpdate = vehicle.registrationCardAvailable === true
@@ -2621,276 +2261,290 @@ const processRegistrationCard = async ({ saleId, sellerId, formulaNumber, regist
     : { $set: { registrationCardMissingMotif: normalizedMissingMotif }, $unset: { formulaNumber: 1 } };
   await VehicleDossier.updateOne({ _id: sale.vehicle }, registrationCardUpdate);
 
-  // Le certificat est produit à cet instant précis : il porte la date de cession attestée.
-  let generatedCert = null;
-  let generatedDecl = null;
-  try {
-    generatedCert = await generateCertificate(sale);
-    generatedDecl = await generatePurchaseDeclarationDoc(sale, generatedCert.vehicle, generatedCert.seller, generatedCert.buyer);
-  } catch (error) {
-    console.error(`Génération des documents impossible (vente ${sale._id}) : ${error.message}`);
-  }
+  sale.registrationCardSubmittedAt = new Date();
+  enterStep(sale, STEP.VERIFICATION, null);
+  await sale.save();
 
-  if (!generatedCert || !generatedDecl) {
-    const err = new Error('La génération des documents a échoué. Vous pouvez relancer le traitement.');
-    err.codeName = 'sale.certificate_generation_failed';
-    err.statusCode = 500;
-    throw err;
-  }
+  await prepareSaleDocuments(sale._id);
+  return Sale.findById(sale._id);
+};
 
-  // Création de la session de signature sur OpenAPI
-  try {
-    const signatureSession = await createSignatureSession({
-      saleId: sale._id.toString(),
-      seller: generatedCert.seller,
-      buyer: generatedCert.buyer,
-      certificateBuffer: generatedCert.buffer,
-      purchaseDeclarationBuffer: generatedDecl.buffer
-    });
+/**
+ * Étape 3.2 : génère le certificat de cession et la déclaration d'achat, remplis et tamponnés
+ * par les deux parties, dès que leurs deux tampons existent. Appelée après la saisie de la
+ * carte grise, à chaque dépôt de tampon, et par la tâche de fond en filet de sécurité.
+ * Renvoie true quand les documents viennent d'être générés.
+ */
+const prepareSaleDocuments = async (saleId) => {
+  const sale = await Sale.findById(saleId).lean();
+  if (!sale || sale.status !== 'en_cours' || sale.currentStep !== STEP.VERIFICATION) return false;
+  if ((sale.documentsReview?.version || 0) > 0) return false;
 
-    // Trouver les URLs de signature pour chaque signataire
-    const sellerSigner = signatureSession.signers?.find(s => s.email === generatedCert.seller.email);
-    const buyerSigner = signatureSession.signers?.find(s => s.email === generatedCert.buyer.email);
+  const [vehicle, seller, buyer] = await Promise.all([
+    VehicleDossier.findById(sale.vehicle)
+      .select('brand model year mileage vin registrationNumber firstRegistrationDate vehicleGenre engine registrationCardAvailable formulaNumber registrationCardMissingMotif')
+      .lean(),
+    User.findById(sale.seller).select('firstName lastName email companyName siret address stampUrl').lean(),
+    User.findById(sale.winner).select('firstName lastName email companyName siret address stampUrl').lean(),
+  ]);
+  // Le dossier reste figé tant qu'il manque un tampon : chaque partie voit une bannière.
+  if (!seller?.stampUrl || !buyer?.stampUrl) return false;
 
-    sale.esignature = {
-      operationId: signatureSession.id,
-      status: signatureSession.state || 'WAIT_VALIDATION',
-      sellerUrl: sellerSigner ? sellerSigner.url : null,
-      buyerUrl: buyerSigner ? buyerSigner.url : null,
-      initiatedAt: new Date(),
-    };
+  // Les tampons sont apposés à part, à des emplacements qui laissent la place aux signatures.
+  const parties = { seller: { ...seller, stampUrl: null }, buyer: { ...buyer, stampUrl: null } };
+  const transferredAt = sale.transferConfirmedAt || new Date();
+  const [certificate, declaration] = await Promise.all([
+    fillCertificateOfTransfer({ vehicle, ...parties, transferredAt }),
+    fillPurchaseDeclaration({ vehicle, ...parties, purchasedAt: transferredAt }),
+  ]);
+  const stamps = { sellerStampUrl: seller.stampUrl, buyerStampUrl: buyer.stampUrl };
+  const [stampedCertificate, stampedDeclaration] = await Promise.all([
+    saleDocuments.stampDocument({ buffer: certificate, document: 'certificate', ...stamps }),
+    saleDocuments.stampDocument({ buffer: declaration, document: 'purchaseDeclaration', ...stamps }),
+  ]);
+  const [storedCertificate, storedDeclaration] = await Promise.all([
+    saveBuffer({ buffer: stampedCertificate, filename: `ventes/certificats/${sale._id}_certificat-cession.pdf`, contentType: 'application/pdf' }),
+    saveBuffer({ buffer: stampedDeclaration, filename: `ventes/declarations/${sale._id}_declaration-achat.pdf`, contentType: 'application/pdf' }),
+  ]);
 
-    // On passe à l'étape 3 (attente de signature)
-    enterStep(sale, 3, null);
-    await sale.save();
+  const now = new Date();
+  const documentOf = (stored) => ({ url: stored.url, filename: stored.filename, source: 'generated', generatedAt: now, updatedAt: now });
+  // Mise à jour conditionnelle : un dépôt de tampon et la tâche de fond peuvent arriver ensemble.
+  const result = await Sale.updateOne(
+    { _id: sale._id, status: 'en_cours', currentStep: STEP.VERIFICATION, 'documentsReview.version': { $in: [0, null] } },
+    {
+      $set: {
+        certificate: documentOf(storedCertificate),
+        purchaseDeclaration: documentOf(storedDeclaration),
+        'documentsReview.version': 1,
+        'documentsReview.correctionOpen': false,
+        'documentsReview.seller': null,
+        'documentsReview.buyer': null,
+      },
+    },
+  );
+  if (result.modifiedCount !== 1) return false;
 
-    // Notifier le vendeur et l'acheteur
-    if (sellerSigner && sellerSigner.url) {
-      await notifySignatureReady(generatedCert.seller, sellerSigner.url, generatedCert.vehicle, sale, true);
+  await notifyDocumentsEvent(sale, 'ready', ['seller', 'buyer']);
+  return true;
+};
+
+/** Un tampon vient d'être déposé : génère les documents des ventes qui n'attendaient que lui. */
+const prepareDocumentsForUser = async (userId) => {
+  const sales = await Sale.find({
+    status: 'en_cours',
+    currentStep: STEP.VERIFICATION,
+    'documentsReview.version': { $in: [0, null] },
+    $or: [{ seller: userId }, { winner: userId }],
+  }).select('_id').lean();
+
+  for (const sale of sales) {
+    try {
+      await prepareSaleDocuments(sale._id);
+    } catch (error) {
+      console.error(`Génération des documents impossible (vente ${sale._id}) : ${error.message}`);
     }
-    if (buyerSigner && buyerSigner.url) {
-      await notifySignatureReady(generatedCert.buyer, buyerSigner.url, generatedCert.vehicle, sale, false);
+  }
+};
+
+const REVIEW_DOCUMENTS = ['certificate', 'purchaseDeclaration'];
+
+/**
+ * Étape 3.2 : une partie valide les documents ou signale une erreur. Un signalement ouvre la
+ * correction : chaque partie peut alors redéposer chaque document. Dès que les deux parties
+ * ont validé la même version, la vente passe à la signature électronique (3.3).
+ */
+const reviewDocuments = async ({ saleId, userId, decision, reason, comment }) => {
+  if (!['valide', 'erreur'].includes(decision)) throw saleError('Avis invalide.', 'sale.review_invalid', 400);
+  const note = typeof comment === 'string' ? comment.trim().slice(0, 1000) : '';
+  if (decision === 'erreur' && !Sale.DOCUMENT_REPORT_REASONS.includes(reason)) {
+    throw saleError("Choisissez le motif de l'erreur.", 'sale.report_reason_required', 400);
+  }
+  if (decision === 'erreur' && reason === 'autre' && !note) {
+    throw saleError("Précisez l'erreur constatée.", 'sale.report_comment_required', 400);
+  }
+
+  const { sale, side } = await loadPartySale(saleId, userId, STEP.VERIFICATION, "Les documents ne sont pas à l'étape de vérification.");
+  const version = sale.documentsReview?.version || 0;
+  if (version === 0) throw saleError('Les documents ne sont pas encore prêts.', 'sale.documents_not_ready', 409);
+
+  const isReport = decision === 'erreur';
+  sale.documentsReview[side] = {
+    decision,
+    reason: isReport ? reason : null,
+    comment: isReport ? (note || null) : null,
+    decidedAt: new Date(),
+  };
+  if (isReport) sale.documentsReview.correctionOpen = true;
+  sale.documentsReview.history.push({
+    type: decision, by: side, reason: isReport ? reason : null, comment: isReport ? (note || null) : null, version,
+  });
+  await sale.save();
+
+  if (isReport) {
+    await notifyDocumentsEvent(sale, 'reported', [side === 'seller' ? 'buyer' : 'seller'], { by: side, reason, comment: note });
+    return { side };
+  }
+
+  // Passage conditionnel à la signature : une seule fois, même si les deux parties valident
+  // au même instant, et seulement pour la version qu'elles ont toutes deux vérifiée.
+  const now = new Date();
+  const claim = await Sale.updateOne(
+    {
+      _id: sale._id,
+      status: 'en_cours',
+      currentStep: STEP.VERIFICATION,
+      'documentsReview.version': version,
+      'documentsReview.seller.decision': 'valide',
+      'documentsReview.buyer.decision': 'valide',
+    },
+    { $set: { currentStep: STEP.SIGNATURE, currentStepStartedAt: now, currentStepDueAt: null, stepRemindersSent: [] } },
+  );
+  if (claim.modifiedCount === 1) {
+    try {
+      await startSignature(sale._id);
+    } catch (error) {
+      // La vente est déjà à l'étape 3.3 : la tâche de fond relancera la création de la session.
+      console.error(`Lancement de la signature impossible (vente ${sale._id}) : ${error.message}`);
     }
-
-  } catch (error) {
-    console.error(`Création de la session de signature échouée (vente ${sale._id}) : ${error.message}`);
-    const err = new Error('L\'intégration avec le service de signature a échoué.');
-    err.codeName = 'sale.esignature_failed';
-    err.statusCode = 500;
-    throw err;
   }
-
-  return sale;
+  return { side };
 };
 
 /**
- * Étape 3 : le vendeur redépose le certificat signé et tamponné. La vente passe alors
- * à l'acheteur pour qu'il fasse de même.
+ * Étape 3.2, après un signalement : une partie redépose une version corrigée d'un document.
+ * Elle remplace la précédente et les deux parties doivent de nouveau vérifier.
  */
-const submitSellerCertificate = async ({ saleId, sellerId, url, filename }) => {
-  if (!url || typeof url !== 'string') {
-    const err = new Error('Le certificat du vendeur est manquant.');
-    err.codeName = 'sale.certificate_missing';
-    throw err;
-  }
-  if (!mongoose.isValidObjectId(saleId)) {
-    const err = new Error('Vente introuvable.');
-    err.codeName = 'sale.not_found';
-    err.statusCode = 404;
-    throw err;
+const uploadReviewDocument = async ({ saleId, userId, document, url, filename }) => {
+  if (!REVIEW_DOCUMENTS.includes(document)) throw saleError('Document inconnu.', 'sale.document_unknown', 400);
+  const documentUrl = typeof url === 'string' ? url.trim() : '';
+  if (!saleDocuments.isPlatformStorageUrl(documentUrl)) {
+    throw saleError('Le document doit être déposé sur la plateforme.', 'sale.document_missing', 400);
   }
 
-  const sale = await Sale.findOne({ _id: saleId, seller: sellerId });
-  if (!sale) {
-    const err = new Error('Vente introuvable.');
-    err.codeName = 'sale.not_found';
-    err.statusCode = 404;
-    throw err;
-  }
-  if (sale.status !== 'en_cours') {
-    const err = new Error("Cette vente n'est plus en cours.");
-    err.codeName = 'sale.not_ongoing';
-    throw err;
-  }
-  if (sale.currentStep !== 4) {
-    const err = new Error("Cette vente n'est pas en attente du certificat vendeur.");
-    err.codeName = 'sale.step_mismatch';
-    throw err;
+  const { sale, side } = await loadPartySale(saleId, userId, STEP.VERIFICATION, "Les documents ne sont pas à l'étape de vérification.");
+  if (!sale.documentsReview?.correctionOpen) {
+    throw saleError("Un document ne peut être redéposé qu'après le signalement d'une erreur.", 'sale.correction_closed', 409);
   }
 
-  sale.certificate.sellerSignedUrl = url;
-  sale.certificate.sellerSignedFilename = filename;
-  sale.certificate.sellerSignedAt = new Date();
-  sale.esignature.sellerStampedUrl = url;
-  sale.esignature.sellerStampedFilename = filename || null;
-  if (sale.certificate.lastRejection?.rejectedBy === 'buyer') {
-    sale.certificate.lastRejection = null;
-  }
+  // Le document part ensuite à la signature : il doit être un PDF exploitable.
+  await saleDocuments.countPages(await saleDocuments.downloadPdf(documentUrl));
 
-  // Le dossier tamponné par le vendeur passe obligatoirement par la validation de l'acheteur.
-  enterStep(sale, 5, null);
-  await sale.save();
-  
-  // Le dossier vendeur est prêt : l'acheteur doit maintenant le valider.
-  await notifyPostSignatureAction(sale, true);
-
-  return sale;
-};
-
-/**
- * Étape 4 : l'acheteur redépose le certificat signé et tamponné. La vente passe alors
- * à la validation des documents par le vendeur (Étape 5).
- */
-
-/**
- * Étape 4 : l'acheteur valide le certificat du vendeur.
- * S'il a un tampon automatique, le document est tamponné et la vente passe à l'étape 6.
- * Sinon, la vente passe à l'étape 5 pour signature manuelle.
- */
-const validateSellerCertificate = async ({ saleId, buyerId }) => {
-  if (!mongoose.isValidObjectId(saleId)) {
-    const err = new Error('Vente introuvable.'); err.codeName = 'sale.not_found'; err.statusCode = 404; throw err;
-  }
-  const sale = await Sale.findOne({ _id: saleId, winner: buyerId });
-  if (!sale) {
-    const err = new Error('Vente introuvable.'); err.codeName = 'sale.not_found'; err.statusCode = 404; throw err;
-  }
-  if (sale.status !== 'en_cours') {
-    const err = new Error("Cette vente n'est plus en cours."); err.codeName = 'sale.not_ongoing'; throw err;
-  }
-  if (sale.currentStep !== 5) {
-    const err = new Error("Cette vente n'est pas à l'étape de validation du certificat vendeur."); err.codeName = 'sale.step_mismatch'; throw err;
-  }
-
-  sale.certificate = {
-    ...(sale.certificate?.toObject?.() || sale.certificate || {}),
-    buyerValidatedAt: new Date(),
-    ...(sale.certificate?.lastRejection?.rejectedBy === 'buyer' ? { lastRejection: null } : {}),
+  const version = (sale.documentsReview.version || 0) + 1;
+  sale[document] = {
+    url: documentUrl,
+    filename: typeof filename === 'string' ? filename : null,
+    source: side,
+    generatedAt: sale[document]?.generatedAt || null,
+    updatedAt: new Date(),
   };
+  sale.documentsReview.version = version;
+  sale.documentsReview.seller = null;
+  sale.documentsReview.buyer = null;
+  sale.documentsReview.history.push({ type: 'depot', by: side, document, url: documentUrl, version });
+  await sale.save();
 
-  const buyer = await User.findById(buyerId).select('stampUrl').lean();
-  if (buyer?.stampUrl) {
-    const sourceUrl = sale.esignature?.sellerStampedUrl || sale.certificate.sellerSignedUrl;
-    const stampedPdf = await stampSignedBundle({ sourceUrl, stampUrl: buyer.stampUrl, role: 'buyer' });
-    const stored = await saveBuffer({
-      buffer: stampedPdf,
-      filename: `ventes/documents/${sale._id}/dossier-signe-tampons-vendeur-acheteur.pdf`,
-      contentType: 'application/pdf',
+  await notifyDocumentsEvent(sale, 'uploaded', [side === 'seller' ? 'buyer' : 'seller'], { by: side, document });
+  return { side };
+};
+
+// Au-delà, une création de session ou une finalisation interrompue peut être reprise
+const LEASE_MS = 5 * 60 * 1000;
+
+/**
+ * Étape 3.3 : envoie à OpenAPI le dossier regroupant les deux documents validés (certificat puis
+ * déclaration), puis transmet à chaque partie son lien de signature. Le verrou posé sur
+ * `esignature.initiatedAt` empêche la tâche de fond de créer une seconde session en parallèle.
+ */
+const startSignature = async (saleId) => {
+  const now = new Date();
+  const lease = await Sale.findOneAndUpdate(
+    {
+      _id: saleId,
+      status: 'en_cours',
+      currentStep: STEP.SIGNATURE,
+      'esignature.operationId': { $in: [null, ''] },
+      $or: [{ 'esignature.initiatedAt': null }, { 'esignature.initiatedAt': { $lt: new Date(now.getTime() - LEASE_MS) } }],
+    },
+    { $set: { 'esignature.initiatedAt': now } },
+    { returnDocument: 'after' },
+  );
+  if (!lease) return null;
+
+  const [certificateBuffer, declarationBuffer] = await Promise.all([
+    saleDocuments.downloadPdf(lease.certificate.url),
+    saleDocuments.downloadPdf(lease.purchaseDeclaration.url),
+  ]);
+  const certificatePageCount = await saleDocuments.countPages(certificateBuffer);
+  const bundleBuffer = await saleDocuments.mergePdfs([certificateBuffer, declarationBuffer]);
+
+  const [seller, buyer, vehicle] = await Promise.all([
+    User.findById(lease.seller).select('_id email firstName lastName companyName language').lean(),
+    User.findById(lease.winner).select('_id email firstName lastName companyName language').lean(),
+    VehicleDossier.findById(lease.vehicle).select('brand model').lean(),
+  ]);
+
+  let session;
+  try {
+    session = await createSignatureSession({
+      saleId: String(lease._id),
+      seller,
+      buyer,
+      bundleBuffer,
+      declarationFirstPage: certificatePageCount + 1,
     });
-    sale.esignature.buyerStampedUrl = stored.url;
-    sale.esignature.buyerStampedFilename = stored.filename;
-    sale.certificate.signedUrl = stored.url;
-    sale.certificate.signedFilename = stored.filename;
-    sale.certificate.signedAt = new Date();
-    
-    enterStep(sale, 7, null);
-    await sale.save();
-    
-    await notifySellerSignedCertificate(sale);
-  } else {
-    enterStep(sale, 6, null);
-    await sale.save();
+  } catch (error) {
+    // Libère le verrou : la prochaine tentative n'attend pas son expiration.
+    await Sale.updateOne({ _id: lease._id, 'esignature.initiatedAt': now }, { $set: { 'esignature.initiatedAt': null } });
+    throw error;
   }
 
-  return sale;
+  // Les signataires sont envoyés vendeur puis acheteur : la position sert de repli.
+  const signerOf = (user, position) => session.signers?.find((signer) => signer.email === user.email) || session.signers?.[position];
+  const sellerUrl = signerOf(seller, 0)?.url || null;
+  const buyerUrl = signerOf(buyer, 1)?.url || null;
+
+  await Sale.updateOne({ _id: lease._id }, {
+    $set: {
+      'esignature.operationId': session.id,
+      'esignature.status': session.state || 'WAIT_VALIDATION',
+      'esignature.sellerUrl': sellerUrl,
+      'esignature.buyerUrl': buyerUrl,
+      'esignature.certificatePageCount': certificatePageCount,
+      'esignature.sellerSignedAt': null,
+      'esignature.buyerSignedAt': null,
+    },
+  });
+
+  if (sellerUrl) await notifySignatureReady(seller, sellerUrl, vehicle, lease, true);
+  if (buyerUrl) await notifySignatureReady(buyer, buyerUrl, vehicle, lease, false);
+  return session.id;
 };
 
 /**
- * Étape 4 : l'acheteur refuse le certificat du vendeur. La vente retourne à l'étape 3.
+ * Filet de sécurité de l'étape 3 : génère les documents qui n'attendaient plus qu'un tampon
+ * (dépôt fait sans passer par la mise à jour du tampon, échec ponctuel du stockage) et relance
+ * les signatures dont la création de session a échoué.
  */
-const rejectSellerCertificate = async ({ saleId, buyerId, reason, comment }) => {
-  if (!Sale.CERTIFICATE_REJECTION_REASONS.includes(reason)) {
-    const err = new Error('Choisissez un motif de refus.'); err.codeName = 'sale.invalid_rejection_reason'; throw err;
+const reconcilePendingDocuments = async () => {
+  const [awaitingDocuments, awaitingSignature] = await Promise.all([
+    Sale.find({ status: 'en_cours', currentStep: STEP.VERIFICATION, 'documentsReview.version': { $in: [0, null] } }).select('_id').lean(),
+    Sale.find({ status: 'en_cours', currentStep: STEP.SIGNATURE, 'esignature.operationId': { $in: [null, ''] } }).select('_id').lean(),
+  ]);
+  for (const sale of awaitingDocuments) {
+    try {
+      await prepareSaleDocuments(sale._id);
+    } catch (error) {
+      console.error(`Génération des documents impossible (vente ${sale._id}) : ${error.message}`);
+    }
   }
-  if (!mongoose.isValidObjectId(saleId)) {
-    const err = new Error('Vente introuvable.'); err.codeName = 'sale.not_found'; err.statusCode = 404; throw err;
+  for (const sale of awaitingSignature) {
+    try {
+      await startSignature(sale._id);
+    } catch (error) {
+      console.error(`Lancement de la signature impossible (vente ${sale._id}) : ${error.message}`);
+    }
   }
-  const sale = await Sale.findOne({ _id: saleId, winner: buyerId });
-  if (!sale) {
-    const err = new Error('Vente introuvable.'); err.codeName = 'sale.not_found'; err.statusCode = 404; throw err;
-  }
-  if (sale.status !== 'en_cours') {
-    const err = new Error("Cette vente n'est plus en cours."); err.codeName = 'sale.not_ongoing'; throw err;
-  }
-  if (sale.currentStep !== 5) {
-    const err = new Error("Cette vente n'est pas à l'étape de validation du certificat vendeur."); err.codeName = 'sale.step_mismatch'; throw err;
-  }
-
-  const current = sale.certificate.toObject?.() || sale.certificate;
-  const rejectionEntry = { url: current.sellerSignedUrl, rejectedBy: 'buyer', reason, comment: comment || '', createdAt: new Date() };
-
-  // Mettre à jour l'historique et réinitialiser les signatures vendeur
-  sale.certificate.rejections = [
-    ...(sale.certificate.rejections || []),
-    rejectionEntry,
-  ];
-  sale.certificate.rejectionCount = (sale.certificate.rejectionCount || 0) + 1;
-  sale.certificate.lastRejection = rejectionEntry;
-  sale.certificate.sellerSignedUrl = null;
-  sale.certificate.sellerSignedFilename = null;
-  sale.certificate.sellerSignedAt = null;
-  sale.certificate.buyerValidatedAt = null;
-  sale.esignature.sellerStampedUrl = null;
-  sale.esignature.sellerStampedFilename = null;
-  sale.esignature.buyerStampedUrl = null;
-  sale.esignature.buyerStampedFilename = null;
-
-  enterStep(sale, 4, null); // Retour au tampon vendeur
-  await sale.save();
-
-  // On notifie le vendeur
-  await notifyCertificateRejected(sale, { reason, comment });
-
-  return sale;
-};
-
-const submitSignedCertificate = async ({ saleId, buyerId, url, filename }) => {
-  if (!url || typeof url !== 'string') {
-    const err = new Error('Le certificat signé est manquant.');
-    err.codeName = 'sale.certificate_missing';
-    throw err;
-  }
-  if (!mongoose.isValidObjectId(saleId)) {
-    const err = new Error('Vente introuvable.');
-    err.codeName = 'sale.not_found';
-    err.statusCode = 404;
-    throw err;
-  }
-
-  const sale = await Sale.findOne({ _id: saleId, winner: buyerId });
-  if (!sale) {
-    const err = new Error('Vente introuvable.');
-    err.codeName = 'sale.not_found';
-    err.statusCode = 404;
-    throw err;
-  }
-  if (sale.status !== 'en_cours') {
-    const err = new Error("Cette vente n'est plus en cours.");
-    err.codeName = 'sale.not_ongoing';
-    throw err;
-  }
-  if (sale.currentStep !== 6) {
-    const err = new Error("Cette vente n'est pas à l'étape du certificat de cession.");
-    err.codeName = 'sale.step_mismatch';
-    throw err;
-  }
-
-  sale.certificate = {
-    ...(sale.certificate?.toObject?.() || sale.certificate || {}),
-    signedUrl: url,
-    signedFilename: filename || null,
-    signedAt: new Date(),
-    ...(sale.certificate?.lastRejection?.rejectedBy === 'seller' ? { lastRejection: null } : {}),
-  };
-  sale.esignature.buyerStampedUrl = url;
-  sale.esignature.buyerStampedFilename = filename || null;
-  // Le vendeur doit maintenant vérifier les documents déposés
-  enterStep(sale, 7, null);
-  await sale.save();
-
-  await notifySellerSignedCertificate(sale);
-
-  return sale;
 };
 
 /**
@@ -3085,94 +2739,98 @@ const forceEndSale = async (saleId, suspendBuyer, suspendSeller, promoteNext) =>
 };
 
 /**
- * Récupère le document signé depuis OpenAPI et fait avancer la vente à l'étape 7
+ * Étape 3.3 terminée : archive le dossier signé, en extrait une copie de chaque document pour
+ * la consultation, génère le bon d'enlèvement et clôture la vente. Le verrou posé sur
+ * `esignature.finalizingAt` évite une double clôture quand le webhook et la tâche de fond
+ * constatent la fin de la signature en même temps.
  */
 const finalizeSignature = async (saleId, signatureId) => {
-  const sale = await Sale.findById(saleId);
-  if (!sale) {
-    throw new Error('Vente introuvable.');
+  const existing = await Sale.findById(saleId).select('status currentStep esignature.operationId').lean();
+  if (!existing) throw saleError('Vente introuvable.', 'sale.not_found', 404);
+  if (existing.status !== 'en_cours' || existing.currentStep !== STEP.SIGNATURE) {
+    console.warn(`La vente ${saleId} n'attend plus de signature. Ignoré.`);
+    return existing;
+  }
+  if (!existing.esignature?.operationId || String(existing.esignature.operationId) !== String(signatureId)) {
+    throw saleError('La signature reçue ne correspond pas à cette vente.', 'sale.esignature_mismatch', 403);
   }
 
-  // Vérifier qu'on est bien à l'étape où on attend la signature
-  if (sale.currentStep !== 3) {
-    console.warn(`La vente ${saleId} n'est pas à l'étape 3. Ignoré.`);
-    return sale;
-  }
-  if (!sale.esignature?.operationId || String(sale.esignature.operationId) !== String(signatureId)) {
-    const error = new Error('La signature reçue ne correspond pas à cette vente.');
-    error.codeName = 'sale.esignature_mismatch';
-    error.statusCode = 403;
-    throw error;
-  }
+  const now = new Date();
+  const sale = await Sale.findOneAndUpdate(
+    {
+      _id: saleId,
+      status: 'en_cours',
+      currentStep: STEP.SIGNATURE,
+      $or: [{ 'esignature.finalizingAt': null }, { 'esignature.finalizingAt': { $lt: new Date(now.getTime() - LEASE_MS) } }],
+    },
+    { $set: { 'esignature.finalizingAt': now } },
+    { returnDocument: 'after' },
+  );
+  if (!sale) return existing;
 
   try {
-    // 1. Récupérer le document signé d'OpenAPI (Buffer)
-    const signedPdfBuffer = await fetchSignedDocument(signatureId);
-
-    // 2. Sauvegarder dans notre espace de stockage
-    const filename = `ventes/documents/${saleId}/documents_signes_${Date.now()}.pdf`;
-    const stored = await saveBuffer({
-      buffer: signedPdfBuffer,
-      filename,
-      contentType: 'application/pdf',
-    });
-    const finalUrl = stored.url;
+    const signedPdfBuffer = Buffer.from(await fetchSignedDocument(signatureId));
+    const folder = `ventes/documents/${saleId}`;
+    const signedBundle = await saveBuffer({ buffer: signedPdfBuffer, filename: `${folder}/dossier-signe.pdf`, contentType: 'application/pdf' });
 
     let auditStored = null;
     try {
       const auditBuffer = await fetchAuditTrail(signatureId);
-      auditStored = await saveBuffer({
-        buffer: auditBuffer,
-        filename: `ventes/documents/${saleId}/audit-signature.pdf`,
-        contentType: 'application/pdf',
-      });
+      auditStored = await saveBuffer({ buffer: auditBuffer, filename: `${folder}/audit-signature.pdf`, contentType: 'application/pdf' });
     } catch (auditError) {
       console.error(`Archivage de la piste d'audit impossible (vente ${saleId}) : ${auditError.message}`);
     }
 
-    // 3. Mettre à jour l'objet Sale
-    sale.esignature = {
-      ...(sale.esignature?.toObject?.() || sale.esignature || {}),
-      status: 'DONE',
-      signedDocumentUrl: finalUrl,
-      signedDocumentFilename: stored.filename,
-      auditUrl: auditStored?.url || null,
-      auditFilename: auditStored?.filename || null,
-      completedAt: new Date(),
-    };
-
-    // L'original OpenAPI reste archivé sans modification. L'étape 4 travaille sur une copie.
-    const seller = await User.findById(sale.seller).select('stampUrl').lean();
-    if (seller?.stampUrl) {
-      const sellerStampedPdf = await stampSignedBundle({
-        sourceBuffer: signedPdfBuffer,
-        stampUrl: seller.stampUrl,
-        role: 'seller',
-      });
-      const sellerStamped = await saveBuffer({
-        buffer: sellerStampedPdf,
-        filename: `ventes/documents/${saleId}/dossier-signe-tampon-vendeur.pdf`,
-        contentType: 'application/pdf',
-      });
-      sale.esignature.sellerStampedUrl = sellerStamped.url;
-      sale.esignature.sellerStampedFilename = sellerStamped.filename;
-      sale.certificate.sellerSignedUrl = sellerStamped.url;
-      sale.certificate.sellerSignedFilename = sellerStamped.filename;
-      sale.certificate.sellerSignedAt = new Date();
-      enterStep(sale, 5, null);
-    } else {
-      enterStep(sale, 4, null);
+    // Copies de consultation : la signature électronique ne vaut que pour le dossier complet.
+    let signedCertificate = null;
+    let signedDeclaration = null;
+    try {
+      const split = sale.esignature?.certificatePageCount || 1;
+      const [certificateCopy, declarationCopy] = await Promise.all([
+        saleDocuments.extractPages(signedPdfBuffer, 0, split),
+        saleDocuments.extractPages(signedPdfBuffer, split),
+      ]);
+      [signedCertificate, signedDeclaration] = await Promise.all([
+        saveBuffer({ buffer: certificateCopy, filename: `${folder}/certificat-cession-signe.pdf`, contentType: 'application/pdf' }),
+        saveBuffer({ buffer: declarationCopy, filename: `${folder}/declaration-achat-signee.pdf`, contentType: 'application/pdf' }),
+      ]);
+    } catch (splitError) {
+      console.error(`Copies des documents signés impossibles (vente ${saleId}) : ${splitError.message}`);
     }
+
+    const [vehicle, seller, buyer] = await Promise.all([
+      VehicleDossier.findById(sale.vehicle)
+        .select('brand model year mileage vin registrationNumber vehicleAddress vehicleAddressDetails')
+        .lean(),
+      User.findById(sale.seller).select('firstName lastName companyName siret address phone').lean(),
+      User.findById(sale.winner).select('firstName lastName companyName siret address phone').lean(),
+    ]);
+    const bon = await generateBonEnlevement(sale, vehicle, seller, buyer);
+
+    sale.esignature.status = 'DONE';
+    sale.esignature.signedDocumentUrl = signedBundle.url;
+    sale.esignature.signedDocumentFilename = signedBundle.filename;
+    sale.esignature.signedCertificateUrl = signedCertificate?.url || null;
+    sale.esignature.signedPurchaseDeclarationUrl = signedDeclaration?.url || null;
+    sale.esignature.auditUrl = auditStored?.url || null;
+    sale.esignature.auditFilename = auditStored?.filename || null;
+    sale.esignature.completedAt = now;
+    sale.bonEnlevement = { url: bon.url, filename: bon.filename, generatedAt: now };
+    sale.status = 'cloturee';
+    sale.closedAt = now;
+    sale.currentStepDueAt = null;
+    sale.stepRemindersSent = [];
     await sale.save();
-
-    await notifyPostSignatureAction(sale, Boolean(seller?.stampUrl));
-
-    console.log(`Signature finalisée pour la vente ${saleId}. Passage à l'étape ${sale.currentStep}.`);
-    return sale;
   } catch (error) {
+    // Libère le verrou : la tâche de fond retentera sans attendre son expiration.
+    await Sale.updateOne({ _id: saleId, 'esignature.finalizingAt': now }, { $set: { 'esignature.finalizingAt': null } });
     console.error(`Erreur lors de la finalisation de la signature (vente ${saleId}) :`, error.message);
     throw error;
   }
+
+  await notifySaleClosed(sale);
+  console.log(`Signature finalisée pour la vente ${saleId} : vente clôturée.`);
+  return sale;
 };
 
 /**
@@ -3209,13 +2867,13 @@ const notifyFirstSignature = async (sale, signedSide) => {
 };
 
 /**
- * Relit l'avancement de la signature électronique (étape 3) sur OpenAPI : enregistre qui a déjà
+ * Relit l'avancement de la signature électronique (étape 3.3) sur OpenAPI : enregistre qui a déjà
  * signé, prévient les parties à la première signature, et finalise la vente dès que les deux
  * ont signé.
  */
 const refreshSignatureProgress = async (saleId) => {
   const sale = await Sale.findById(saleId).select('seller winner vehicle status currentStep esignature').lean();
-  if (!sale || sale.status !== 'en_cours' || sale.currentStep !== 3 || !sale.esignature?.operationId) return;
+  if (!sale || sale.status !== 'en_cours' || sale.currentStep !== STEP.SIGNATURE || !sale.esignature?.operationId) return;
 
   const operationId = sale.esignature.operationId;
   const { state, signers } = await fetchSignatureProgress(operationId);
@@ -3240,7 +2898,7 @@ const refreshSignatureProgress = async (saleId) => {
     // Mise à jour conditionnelle : le webhook, la tâche de fond et le retour navigateur peuvent
     // constater la même signature en même temps, une seule notification doit partir.
     const result = await Sale.updateOne(
-      { _id: sale._id, currentStep: 3, 'esignature.operationId': operationId, [field]: null },
+      { _id: sale._id, currentStep: STEP.SIGNATURE, 'esignature.operationId': operationId, [field]: null },
       { $set: { [field]: new Date() } },
     );
     if (result.modifiedCount === 1) justSigned.push(side);
@@ -3255,7 +2913,7 @@ const refreshSignatureProgress = async (saleId) => {
 };
 
 /**
- * Appelé par la page de vente au retour de la plateforme de signature (et quand l'onglet reprend
+ * Appelé par la page de vente au retour de la plateforme de signature (étape 3.3) (et quand l'onglet reprend
  * le focus) : relit l'avancement sans attendre le webhook ni la tâche de fond, et indique de
  * quel côté de la vente se trouve l'utilisateur pour le rediriger vers la bonne page.
  */
@@ -3290,7 +2948,7 @@ const syncSignatureForUser = async (saleId, userId) => {
 const reconcilePendingSignatures = async () => {
   const sales = await Sale.find({
     status: 'en_cours',
-    currentStep: 3,
+    currentStep: STEP.SIGNATURE,
     'esignature.operationId': { $nin: [null, ''] },
   }).select('_id').lean();
 
@@ -3304,8 +2962,6 @@ const reconcilePendingSignatures = async () => {
 };
 
 module.exports = {
-  validateSellerCertificate,
-  rejectSellerCertificate,
   buildWaitingList,
   attributeVehicle,
   processSessionAttributions,
@@ -3326,12 +2982,11 @@ module.exports = {
   acceptSellerOffer,
   relistSuspendedVehicle,
   confirmTransferReceived,
-  processRegistrationCard,
-  submitSellerCertificate,
-  submitSignedCertificate,
-  validateSignedCertificate,
-  rejectSignedCertificate,
-  confirmHandover,
+  submitRegistrationCard,
+  prepareDocumentsForUser,
+  reviewDocuments,
+  uploadReviewDocument,
+  reconcilePendingDocuments,
   cancelSaleByBuyer,
   toggleSaleTimer,
   forceEndSale,

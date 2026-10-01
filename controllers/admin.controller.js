@@ -115,8 +115,8 @@ const getSale = async (req, res, next) => {
     // second appel. Les pièces jointes lourdes (photos, documents) en font partie.
     const sale = await Sale.findById(req.params.id)
       .populate('vehicle')
-      .populate('winner', 'firstName lastName companyName email phone address siret status role')
-      .populate('seller', 'firstName lastName companyName email phone address siret status role bankInfo vhuNumber')
+      .populate('winner', 'firstName lastName companyName email phone address siret status role stampUrl')
+      .populate('seller', 'firstName lastName companyName email phone address siret status role bankInfo vhuNumber stampUrl')
       .populate('session', 'name startDate endDate status')
       .populate('waitingList.buyer', 'firstName lastName companyName email phone')
       .lean();

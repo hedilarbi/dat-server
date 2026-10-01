@@ -1,26 +1,26 @@
 const mongoose = require('mongoose');
 
-// Motifs de refus d'un certificat signé, proposés au vendeur à l'étape de validation.
-const CERTIFICATE_REJECTION_REASONS = [
+// Motifs proposés à une partie qui signale une erreur sur les documents tamponnés (étape 3.2).
+const DOCUMENT_REPORT_REASONS = [
   'tampon_manquant',
   'mauvais_tampon',
+  'informations_erronees',
   'document_illisible',
-  'signature_manquante',
   'document_incomplet',
-  'mauvais_document',
   'autre',
 ];
 
-// Étapes de la procédure d'achat suivie par le gagnant, dans l'ordre.
+// Étapes de la procédure d'achat suivie par le gagnant, dans l'ordre. Les étapes 3 à 5 forment
+// l'étape « Documents administratifs » présentée aux utilisateurs en 3.1, 3.2 et 3.3.
+// La vente est clôturée dès que les deux parties ont signé (étape 3.3).
 const PURCHASE_STEPS = [
   'commission',             // 1. Paiement de la commission par l'acheteur
-  'virement_carte_grise',   // 2. Virement confirmé et dernière information carte grise
-  'signature_electronique', // 3. Signature électronique du dossier par les deux parties
-  'tampon_vendeur',         // 4. Tampon automatique ou dépôt manuel du vendeur
-  'validation_acheteur',    // 5. Validation des documents vendeur par l'acheteur
-  'tampon_acheteur',        // 6. Tampon automatique ou dépôt manuel de l'acheteur
-  'validation_vendeur',     // 7. Validation finale des documents par le vendeur
-  'enlevement',             // 8. Bon d'enlèvement, remise et clôture
+  // Clé historique conservée : les motifs de retrait déjà enregistrés
+  // (virement_carte_grise_delai_depasse) et le calcul des pénalités en dépendent.
+  'virement_carte_grise',   // 2. Virement du prix, confirmé par le vendeur
+  'preparation_documents',  // 3.1 Données de la carte grise (vendeur) et tampons des deux parties
+  'verification_documents', // 3.2 Vérification des documents tamponnés par les deux parties
+  'signature_electronique', // 3.3 Signature électronique par les deux parties
 ];
 
 /**
@@ -45,6 +45,36 @@ const waitingListEntrySchema = new mongoose.Schema({
   topThreeEmailSentAt: { type: Date, default: null },
   promotionEmailSentAt: { type: Date, default: null },
   sellerPromotionEmailSentAt: { type: Date, default: null }
+}, { _id: false });
+
+// Un des deux documents administratifs. `source` indique qui l'a produit : la plateforme
+// (généré et tamponné automatiquement) ou une partie qui l'a redéposé après un signalement.
+const saleDocumentSchema = new mongoose.Schema({
+  url: { type: String, default: null },
+  filename: { type: String, default: null },
+  source: { type: String, enum: ['generated', 'seller', 'buyer'], default: 'generated' },
+  generatedAt: { type: Date, default: null },
+  updatedAt: { type: Date, default: null }
+}, { _id: false });
+
+// Avis d'une partie sur la version courante des documents
+const reviewDecisionSchema = new mongoose.Schema({
+  decision: { type: String, enum: ['valide', 'erreur'], default: null },
+  reason: { type: String, enum: DOCUMENT_REPORT_REASONS, default: null },
+  comment: { type: String, trim: true, default: null },
+  decidedAt: { type: Date, default: null }
+}, { _id: false });
+
+// Trace de la vérification : avis donnés et documents redéposés, pour l'administration
+const reviewEventSchema = new mongoose.Schema({
+  type: { type: String, enum: ['valide', 'erreur', 'depot'], required: true },
+  by: { type: String, enum: ['seller', 'buyer'], required: true },
+  document: { type: String, enum: ['certificate', 'purchaseDeclaration'], default: null },
+  reason: { type: String, enum: DOCUMENT_REPORT_REASONS, default: null },
+  comment: { type: String, trim: true, default: null },
+  url: { type: String, default: null },
+  version: { type: Number, required: true },
+  createdAt: { type: Date, default: Date.now }
 }, { _id: false });
 
 /**
@@ -126,80 +156,56 @@ const saleSchema = new mongoose.Schema({
   // Étape 2 : le virement est fait hors plateforme, le vendeur en confirme la réception
   transferConfirmedAt: { type: Date, default: null },
 
-  // Documents et versions tamponnées utilisés entre les étapes 3 et 7.
-  certificate: {
-    url: { type: String, default: null },
-    filename: { type: String, default: null },
-    generatedAt: { type: Date, default: null },
-    // Étape 3 : le vendeur télécharge, signe et redépose le certificat (si pas de tampon auto)
-    sellerSignedUrl: { type: String, default: null },
-    sellerSignedFilename: { type: String, default: null },
-    sellerSignedAt: { type: Date, default: null },
-    // Étape 4 : l'acheteur valide que le document du vendeur est correct
-    buyerValidatedAt: { type: Date, default: null },
-    // Étape 5 : l'acheteur télécharge (le doc du vendeur), signe et redépose le certificat (si pas de tampon auto)
-    signedUrl: { type: String, default: null },
-    signedFilename: { type: String, default: null },
-    signedAt: { type: Date, default: null },
-    // Étape 6 : le vendeur atteste que le document déposé est bien signé et tamponné
-    validatedAt: { type: Date, default: null },
-    // Historique des refus : le document écarté est conservé pour la traçabilité.
-    rejections: [{
-      url: { type: String },
-      rejectedBy: { type: String, enum: ['buyer', 'seller'], required: true },
-      reason: { type: String, enum: CERTIFICATE_REJECTION_REASONS, required: true },
-      comment: { type: String, trim: true },
-      createdAt: { type: Date, default: Date.now }
-    }],
-    rejectionCount: { type: Number, default: 0 },
-    lastRejection: {
-      url: { type: String },
-      rejectedBy: { type: String, enum: ['buyer', 'seller'] },
-      reason: { type: String, enum: CERTIFICATE_REJECTION_REASONS },
-      comment: { type: String, trim: true },
-      createdAt: { type: Date }
-    }
+  // Étape 3.1 : le vendeur a saisi les données complémentaires de la carte grise
+  registrationCardSubmittedAt: { type: Date, default: null },
+
+  // Version courante des deux documents, remplis et tamponnés par les deux parties (étape 3.2),
+  // puis envoyés ensemble à la signature (étape 3.3). Un dépôt après un signalement remplace
+  // le document généré.
+  certificate: saleDocumentSchema,
+  purchaseDeclaration: saleDocumentSchema,
+
+  // Étape 3.2 : chaque partie valide les documents ou signale une erreur.
+  documentsReview: {
+    // Incrémentée à chaque nouvelle version d'un document : les avis précédents ne valent plus.
+    version: { type: Number, default: 0 },
+    // Ouverte au premier signalement : chaque partie peut alors redéposer chaque document,
+    // jusqu'à ce que les deux valident une même version.
+    correctionOpen: { type: Boolean, default: false },
+    seller: reviewDecisionSchema,
+    buyer: reviewDecisionSchema,
+    history: { type: [reviewEventSchema], default: [] }
   },
 
-  // Déclaration d'achat Cerfa 13751*02, générée avec le certificat dès l'étape 3.
-  purchaseDeclaration: {
-    url: { type: String, default: null },
-    filename: { type: String, default: null },
-    generatedAt: { type: Date, default: null }
-  },
-
-  // Documents disponibles lors de l'étape 8 (enlèvement).
-  handover: {
-    declarationUrl: { type: String, default: null },
-    declarationFilename: { type: String, default: null },
-    generatedAt: { type: Date, default: null },
-    confirmedAt: { type: Date, default: null }
-  },
-
-  // Document Bon d'enlèvement
+  // Bon d'enlèvement, généré à la clôture de la vente
   bonEnlevement: {
     url: { type: String, default: null },
     filename: { type: String, default: null },
     generatedAt: { type: Date, default: null }
   },
 
-  // Intégration Signature Électronique (OpenAPI)
+  // Étape 3.3 : signature électronique (OpenAPI) du dossier regroupant les deux documents
   esignature: {
     operationId: { type: String, default: null },
-    status: { type: String, default: null }, // ex: WAIT_VALIDATION, SIGNED, ERROR
+    status: { type: String, default: null }, // ex: WAIT_VALIDATION, WAIT_SIGNER, DONE, ERROR
     sellerUrl: { type: String, default: null },
     buyerUrl: { type: String, default: null },
+    // Posé juste avant l'appel à OpenAPI : empêche deux créations simultanées de la session
     initiatedAt: { type: Date, default: null },
+    // Posé au début de la finalisation : le webhook et la tâche de fond ne la mènent qu'une fois
+    finalizingAt: { type: Date, default: null },
+    // Nombre de pages du certificat en tête du dossier : la déclaration commence juste après
+    certificatePageCount: { type: Number, default: null },
     // Avancement par signataire, relu sur OpenAPI : chaque partie voit si l'autre a déjà signé
     // et n'est prévenue qu'une fois (confirmation au signataire, « à vous » pour l'autre).
     sellerSignedAt: { type: Date, default: null },
     buyerSignedAt: { type: Date, default: null },
+    // Dossier signé tel que renvoyé par OpenAPI : c'est lui qui porte la signature électronique.
     signedDocumentUrl: { type: String, default: null },
     signedDocumentFilename: { type: String, default: null },
-    sellerStampedUrl: { type: String, default: null },
-    sellerStampedFilename: { type: String, default: null },
-    buyerStampedUrl: { type: String, default: null },
-    buyerStampedFilename: { type: String, default: null },
+    // Copies de consultation de chaque document, extraites du dossier signé
+    signedCertificateUrl: { type: String, default: null },
+    signedPurchaseDeclarationUrl: { type: String, default: null },
     auditUrl: { type: String, default: null },
     auditFilename: { type: String, default: null },
     completedAt: { type: Date, default: null }
@@ -220,4 +226,4 @@ const Sale = mongoose.model('Sale', saleSchema);
 
 module.exports = Sale;
 module.exports.PURCHASE_STEPS = PURCHASE_STEPS;
-module.exports.CERTIFICATE_REJECTION_REASONS = CERTIFICATE_REJECTION_REASONS;
+module.exports.DOCUMENT_REPORT_REASONS = DOCUMENT_REPORT_REASONS;

@@ -666,6 +666,17 @@ const updateStamp = async (userId, stampUrl) => {
   user.stampUrl = normalized;
   await user.save();
 
+  // Étape 3.2 : les documents des ventes qui n'attendaient plus que ce tampon sont générés.
+  // Chargé à l'appel : sale.service charge lui-même des services qui dépendent de celui-ci.
+  if (normalized) {
+    try {
+      await require('./sale.service').prepareDocumentsForUser(user._id);
+    } catch (error) {
+      // La tâche de fond reprendra : le dépôt du tampon reste enregistré.
+      console.error(`Génération des documents après dépôt du tampon impossible (${user._id}) : ${error.message}`);
+    }
+  }
+
   const userObj = user.toObject();
   delete userObj.password;
   delete userObj.otp;

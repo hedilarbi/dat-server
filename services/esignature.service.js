@@ -27,17 +27,30 @@ const requiredUrl = (name) => {
   return raw.replace(/\/+$/, '');
 };
 
-/**
- * Convertit un buffer PDF ou une URL en base64 pour OpenAPI
- */
-const bufferToBase64 = (buffer) => {
-  return buffer.toString('base64');
+// Zones de signature sur la première page de chaque document (x, y depuis le haut de la page).
+// Les tampons (saleDocuments.service.js) sont posés à côté et ne doivent pas les recouvrir.
+const SIGNATURE_FIELDS = {
+  certificate: {
+    seller: { x: '120', y: '518' }, // Sous « Fait à … le », cadre « Ancien propriétaire »
+    buyer: { x: '120', y: '772' },  // Sous « Fait à … le », cadre « Nouveau propriétaire »
+  },
+  purchaseDeclaration: {
+    seller: { x: '120', y: '738' }, // Sous « Fait à … le », cadre « Certificat de vente »
+    buyer: { x: '250', y: '430' },  // À gauche du cadre « Cachet et signature de l'acquéreur »
+  },
 };
 
+const signaturesFor = (role, declarationFirstPage) => [
+  { page: 1, ...SIGNATURE_FIELDS.certificate[role] },
+  { page: declarationFirstPage, ...SIGNATURE_FIELDS.purchaseDeclaration[role] },
+];
+
 /**
- * Créer une requête SES pour les 2 documents avec les 2 signataires (vendeur, acheteur)
+ * Créer une requête SES pour le dossier regroupant les deux documents (certificat de cession
+ * puis déclaration d'achat, tous deux remplis et tamponnés), avec les deux signataires.
+ * `declarationFirstPage` : page (à partir de 1) où commence la déclaration dans le dossier.
  */
-const createSignatureSession = async ({ saleId, seller, buyer, certificateBuffer, purchaseDeclarationBuffer }) => {
+const createSignatureSession = async ({ saleId, seller, buyer, bundleBuffer, declarationFirstPage }) => {
   const token = process.env.ESIGNATURE_TOKEN;
   if (!token) {
     throw new Error('ESIGNATURE_TOKEN manquant dans les variables d\'environnement');
@@ -63,11 +76,7 @@ const createSignatureSession = async ({ saleId, seller, buyer, certificateBuffer
     inputDocuments: [
       {
         sourceType: "base64",
-        payload: bufferToBase64(certificateBuffer)
-      },
-      {
-        sourceType: "base64",
-        payload: bufferToBase64(purchaseDeclarationBuffer)
+        payload: bundleBuffer.toString('base64')
       }
     ],
     signers: [
@@ -78,12 +87,7 @@ const createSignatureSession = async ({ saleId, seller, buyer, certificateBuffer
         authentication: ["email"],
         language: seller.language || 'fr',
         message: "Bonjour, voici votre code OTP pour signer les documents de vente: {OTP}",
-        signatures: [
-          // Certificat de cession (Page 1) - Vendeur (Bas de la section Ancien propriétaire)
-          { page: 1, x: "260", y: "502" },
-          // Déclaration d'achat (Page 2) - Vendeur (Bas de page)
-          { page: 2, x: "260", y: "732" }
-        ]
+        signatures: signaturesFor('seller', declarationFirstPage)
       },
       {
         name: buyer.firstName || buyer.companyName || 'Acheteur',
@@ -92,12 +96,7 @@ const createSignatureSession = async ({ saleId, seller, buyer, certificateBuffer
         authentication: ["email"],
         language: buyer.language || 'fr',
         message: "Bonjour, voici votre code OTP pour signer les documents de vente: {OTP}",
-        signatures: [
-          // Certificat de cession (Page 1) - Acheteur (Bas de page)
-          { page: 1, x: "260", y: "780" },
-          // Déclaration d'achat (Page 2) - Acheteur (Milieu de page)
-          { page: 2, x: "340", y: "432" }
-        ]
+        signatures: signaturesFor('buyer', declarationFirstPage)
       }
     ],
     options: {
@@ -140,7 +139,8 @@ const createSignatureSession = async ({ saleId, seller, buyer, certificateBuffer
 };
 
 module.exports = {
-  createSignatureSession
+  createSignatureSession,
+  SIGNATURE_FIELDS
 };
 
 /**

@@ -94,42 +94,6 @@ const listSellerSales = async (req, res, next) => {
   }
 };
 
-const submitSignedCertificate = async (req, res, next) => {
-  try {
-    const sale = await saleService.submitSignedCertificate({
-      saleId: req.params.id,
-      buyerId: req.user._id,
-      url: req.body.url,
-      filename: req.body.filename,
-    });
-    res.status(200).json({
-      success: true,
-      message: 'Dossier signé et tamponné déposé. Le vendeur va le vérifier.',
-      sale: await saleService.getBuyerSale(sale._id, req.user._id),
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-const submitSellerCertificate = async (req, res, next) => {
-  try {
-    const sale = await saleService.submitSellerCertificate({
-      saleId: req.params.id,
-      sellerId: req.user._id,
-      url: req.body.url,
-      filename: req.body.filename,
-    });
-    res.status(200).json({
-      success: true,
-      message: 'Dossier signé et tamponné déposé.',
-      sale: await saleService.getSellerSale(sale._id, req.user._id),
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
 const getSellerSale = async (req, res, next) => {
   try {
     const sale = await saleService.getSellerSale(req.params.id, req.user._id);
@@ -181,9 +145,9 @@ const confirmTransferReceived = async (req, res, next) => {
   }
 };
 
-const processRegistrationCard = async (req, res, next) => {
+const submitRegistrationCard = async (req, res, next) => {
   try {
-    const sale = await saleService.processRegistrationCard({
+    const sale = await saleService.submitRegistrationCard({
       saleId: req.params.id,
       sellerId: req.user._id,
       formulaNumber: req.body.formulaNumber,
@@ -191,7 +155,7 @@ const processRegistrationCard = async (req, res, next) => {
     });
     res.status(200).json({
       success: true,
-      message: 'Données de la carte grise enregistrées et documents générés.',
+      message: 'Données de la carte grise enregistrées.',
       sale: await saleService.getSellerSale(sale._id, req.user._id),
     });
   } catch (error) {
@@ -199,51 +163,43 @@ const processRegistrationCard = async (req, res, next) => {
   }
 };
 
-const validateSignedCertificate = async (req, res, next) => {
-  try {
-    const sale = await saleService.validateSignedCertificate({
-      saleId: req.params.id,
-      sellerId: req.user._id,
-    });
-    res.status(200).json({
-      success: true,
-      message: 'Documents validés. Le bon d’enlèvement est maintenant disponible.',
-      sale: await saleService.getSellerSale(sale._id, req.user._id),
-    });
-  } catch (error) {
-    next(error);
-  }
-};
+// Étape 3.2 : chaque partie reçoit la vente telle qu'elle la voit depuis son propre espace.
+const saleForSide = (side, saleId, userId) => (side === 'seller'
+  ? saleService.getSellerSale(saleId, userId)
+  : saleService.getBuyerSale(saleId, userId));
 
-const rejectSignedCertificate = async (req, res, next) => {
+const reviewDocuments = async (req, res, next) => {
   try {
-    const sale = await saleService.rejectSignedCertificate({
+    const { side } = await saleService.reviewDocuments({
       saleId: req.params.id,
-      sellerId: req.user._id,
+      userId: req.user._id,
+      decision: req.body.decision,
       reason: req.body.reason,
       comment: req.body.comment,
     });
     res.status(200).json({
       success: true,
-      message: 'Certificat refusé. L’acheteur a été invité à en redéposer un.',
-      sale: await saleService.getSellerSale(sale._id, req.user._id),
+      message: req.body.decision === 'valide' ? 'Documents validés.' : 'Erreur signalée. Vous pouvez déposer des documents corrigés.',
+      sale: await saleForSide(side, req.params.id, req.user._id),
     });
   } catch (error) {
     next(error);
   }
 };
 
-const confirmHandover = async (req, res, next) => {
+const uploadReviewDocument = async (req, res, next) => {
   try {
-    const sale = await saleService.confirmHandover({
+    const { side } = await saleService.uploadReviewDocument({
       saleId: req.params.id,
-      sellerId: req.user._id,
-      otp: req.body.otp,
+      userId: req.user._id,
+      document: req.body.document,
+      url: req.body.url,
+      filename: req.body.filename,
     });
     res.status(200).json({
       success: true,
-      message: 'Enlèvement confirmé. La vente est clôturée.',
-      sale: await saleService.getSellerSale(sale._id, req.user._id),
+      message: 'Document déposé. Les deux parties doivent de nouveau vérifier les documents.',
+      sale: await saleForSide(side, req.params.id, req.user._id),
     });
   } catch (error) {
     next(error);
@@ -266,40 +222,6 @@ const cancelSaleByBuyer = async (req, res, next) => {
   }
 };
 
-const validateSellerCertificate = async (req, res, next) => {
-  try {
-    const sale = await saleService.validateSellerCertificate({
-      saleId: req.params.id,
-      buyerId: req.user._id,
-    });
-    res.status(200).json({
-      success: true,
-      message: 'Certificat vendeur validé.',
-      sale: await saleService.getBuyerSale(sale._id, req.user._id),
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-const rejectSellerCertificate = async (req, res, next) => {
-  try {
-    const sale = await saleService.rejectSellerCertificate({
-      saleId: req.params.id,
-      buyerId: req.user._id,
-      reason: req.body.reason,
-      comment: req.body.comment,
-    });
-    res.status(200).json({
-      success: true,
-      message: 'Certificat vendeur refusé. Le vendeur a été invité à en redéposer un.',
-      sale: await saleService.getBuyerSale(sale._id, req.user._id),
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
 module.exports = {
   listMySales,
   getMySale,
@@ -308,18 +230,13 @@ module.exports = {
   startCommissionPayment,
   startCommissionPaymentIntent,
   confirmCommissionPayment,
-  submitSignedCertificate,
-  submitSellerCertificate,
-  validateSellerCertificate,
-  rejectSellerCertificate,
   listSellerSales,
   getSellerSale,
   acceptSellerOffer,
   relistSuspendedVehicle,
   confirmTransferReceived,
-  processRegistrationCard,
-  validateSignedCertificate,
-  rejectSignedCertificate,
-  confirmHandover,
+  submitRegistrationCard,
+  reviewDocuments,
+  uploadReviewDocument,
   cancelSaleByBuyer,
 };

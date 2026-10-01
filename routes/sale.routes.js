@@ -18,25 +18,13 @@ router.post('/seller/:id/relist', vendeurOnly, saleController.relistSuspendedVeh
 // Étape 2 : le vendeur atteste avoir reçu le virement de l'acheteur
 router.post('/:id/transfer-received', vendeurOnly, saleController.confirmTransferReceived);
 
-// Étape 2,5 : collecte des données carte grise, puis génération des documents
-router.post('/:id/registration-card', vendeurOnly, saleController.processRegistrationCard);
+// Étape 3.1 : données complémentaires de la carte grise, saisies par le vendeur
+router.post('/:id/registration-card', vendeurOnly, saleController.submitRegistrationCard);
 
-// Étape 4 : le vendeur dépose le dossier signé et tamponné s'il n'a pas de tampon auto
-router.post('/:id/certificate/seller', vendeurOnly, saleController.submitSellerCertificate);
-
-// Étape 5 : l'acheteur valide le dossier tamponné par le vendeur
-router.post('/:id/seller-certificate/validate', acheteurOrVendeur, saleController.validateSellerCertificate);
-router.post('/:id/seller-certificate/reject', acheteurOrVendeur, saleController.rejectSellerCertificate);
-
-// Étape 6 : l'acheteur dépose le dossier signé et tamponné s'il n'a pas de tampon auto
-router.post('/:id/certificate', acheteurOrVendeur, saleController.submitSignedCertificate);
-
-// Étape 7 : le vendeur effectue la validation finale des documents
-router.post('/:id/certificate/validate', vendeurOnly, saleController.validateSignedCertificate);
-router.post('/:id/certificate/reject', vendeurOnly, saleController.rejectSignedCertificate);
-
-// Étape 8 : le vendeur atteste la remise du véhicule et clôture la vente
-router.post('/:id/handover', vendeurOnly, saleController.confirmHandover);
+// Étape 3.2 : chaque partie valide les documents tamponnés ou signale une erreur, puis,
+// après un signalement, peut redéposer une version corrigée de chaque document
+router.post('/:id/documents/review', acheteurOrVendeur, saleController.reviewDocuments);
+router.post('/:id/documents/upload', acheteurOrVendeur, saleController.uploadReviewDocument);
 
 // Détail d'une vente remportée, avec l'avancement de la procédure d'achat.
 // Déclarée après /seller pour que ce segment fixe ne soit pas capté comme un identifiant.
@@ -45,7 +33,7 @@ router.get('/:id', acheteurOrVendeur, saleController.getMySale);
 // Détail complet du véhicule remporté
 router.get('/:id/vehicle', acheteurOrVendeur, saleController.getSaleVehicle);
 
-// Étape 3 : relit l'avancement de la signature électronique (vendeur ou acheteur de la vente)
+// Étape 3.3 : relit l'avancement de la signature électronique (vendeur ou acheteur de la vente)
 router.post('/:id/esignature/sync', acheteurOrVendeur, saleController.syncSignature);
 
 // Étape 1 : ouverture du paiement Stripe de la commission, puis confirmation au retour

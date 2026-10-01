@@ -25,7 +25,10 @@ const syncSessionsAndAttributions = async () => {
   await saleService.processPendingAttributionEmails();
   // Rattrape les commissions encaissées dont le retour navigateur n'est jamais arrivé
   await saleService.reconcilePendingCommissionPayments();
-  // Rattrape les signatures terminées dont le webhook OpenAPI n'est jamais arrivé (étape 3)
+  // Étape 3.2 : documents qui n'attendaient plus qu'un tampon ; étape 3.3 : sessions de
+  // signature dont la création a échoué
+  await saleService.reconcilePendingDocuments();
+  // Rattrape les signatures terminées dont le webhook OpenAPI n'est jamais arrivé (étape 3.3)
   await saleService.reconcilePendingSignatures();
   // Rappels à 50 % et 80 % du délai, puis retrait de l'attribution à l'expiration
   await saleService.processStepDeadlines();
