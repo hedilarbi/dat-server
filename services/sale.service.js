@@ -836,6 +836,8 @@ const serializeSale = (sale, stamps) => {
       phone: sale.seller.phone || '',
       email: sale.seller.email || '',
       address: sale.seller.address || null,
+      // Vérifié par l'acheteur sur les documents tamponnés (étape « Validation des documents »)
+      siret: sale.seller.siret || null,
       bankInfo: sale.seller.bankInfo ? {
         bankName: sale.seller.bankInfo.bankName || '',
         accountHolder: sale.seller.bankInfo.accountHolder || '',
@@ -887,7 +889,7 @@ const getBuyerSale = async (saleId, buyerId) => {
     .populate('vehicle', 'brand model year mileage photos registrationNumber')
     .populate('session', 'name endDate')
     .populate('winningOffer', 'fees')
-    .populate('seller', 'companyName firstName lastName phone email address bankInfo stampUrl')
+    .populate('seller', 'companyName firstName lastName phone email address siret bankInfo stampUrl')
     .lean();
 
   if (!sale) {
@@ -1916,7 +1918,7 @@ const getSellerSale = async (saleId, sellerId) => {
   let sale = await Sale.findOne({ _id: saleId, seller: sellerId })
     .populate('vehicle', 'brand model year mileage photos listingCount registrationNumber registrationCardAvailable formulaNumber registrationCardMissingMotif')
     .populate('session', 'name endDate')
-    .populate('winner', 'companyName firstName lastName email phone address stampUrl')
+    .populate('winner', 'companyName firstName lastName email phone address siret stampUrl')
     .lean();
   const sellerStamp = await User.findById(sellerId).select('stampUrl').lean();
 
@@ -2031,6 +2033,8 @@ const getSellerSale = async (saleId, sellerId) => {
       email: sale.winner.email || '',
       phone: sale.winner.phone || '',
       address: sale.winner.address || null,
+      // Vérifié par le vendeur sur les documents tamponnés (étape « Validation des documents »)
+      siret: sale.winner.siret || null,
     } : null,
   };
 };
