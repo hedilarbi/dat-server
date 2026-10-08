@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const Session = require('../models/session.model');
 const VehicleDossier = require('../models/vehicleDossier.model');
+const Offer = require('../models/offer.model');
 const sessionService = require('../services/session.service');
 const { protect } = require('../middlewares/auth.middleware');
 const { adminOnly } = require('../middlewares/role.middleware');
@@ -116,7 +117,37 @@ router.get('/:id', protect, adminOnly, async (req, res) => {
       $or: [{ session: session._id.toString() }, { session: session._id }],
     }).lean();
 
-    session.vehicles = vehicles;
+    // Les trois meilleures offres actives de chaque véhicule, pour que l'admin juge la session
+    // d'un coup d'œil ; la liste complète et l'historique s'ouvrent à la demande.
+    const activeOffers = await Offer.find({
+      session: session._id,
+      vehicle: { $in: vehicles.map((vehicle) => vehicle._id) },
+      status: 'active',
+    })
+      .populate('buyer', 'companyName firstName lastName')
+      .sort({ amount: -1, updatedAt: 1 })
+      .select('vehicle buyer amount revisions updatedAt amountUpdatedAt')
+      .lean();
+    const offersByVehicle = new Map();
+    for (const offer of activeOffers) {
+      const key = String(offer.vehicle);
+      offersByVehicle.set(key, [...(offersByVehicle.get(key) || []), offer]);
+    }
+
+    session.vehicles = vehicles.map((vehicle) => {
+      const offers = offersByVehicle.get(String(vehicle._id)) || [];
+      return {
+        ...vehicle,
+        offerCount: offers.length,
+        topOffers: offers.slice(0, 3).map((offer) => ({
+          _id: offer._id,
+          amount: offer.amount,
+          buyerName: offer.buyer?.companyName || [offer.buyer?.firstName, offer.buyer?.lastName].filter(Boolean).join(' ') || 'Acheteur',
+          at: offer.amountUpdatedAt || offer.updatedAt,
+          modified: (offer.revisions || []).length > 0,
+        })),
+      };
+    });
     session.vehicleCount = vehicles.length;
     res.json(await sessionService.withResolvedCommission(session));
   } catch (error) {

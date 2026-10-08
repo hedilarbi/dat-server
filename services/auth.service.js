@@ -396,6 +396,16 @@ const updateProfile = async (userId, profileData) => {
     throw err;
   }
 
+  // Photographie des champs du profil avant modification, pour savoir si quelque chose a
+  // réellement changé : renvoyer le formulaire tel quel ne doit pas faire perdre la validation.
+  const snapshot = () => JSON.stringify([
+    user.firstName, user.lastName, user.companyName, user.activityType, user.phone,
+    user.address?.street, user.address?.postalCode, user.address?.city, user.address?.country,
+    user.siret, user.kbisUrl, user.cinRectoUrl, user.cinVersoUrl, user.vhuNumber,
+    user.bankInfo?.bankName, user.bankInfo?.accountHolder, user.bankInfo?.iban, user.bankInfo?.bic, user.bankInfo?.ribUrl,
+  ].map((value) => (value == null ? '' : String(value).trim())));
+  const before = snapshot();
+
   const { firstName, lastName, companyName, activityType, phone, address, siret, kbisUrl, cinRectoUrl, cinVersoUrl, vhuNumber, bankInfo } = profileData;
 
   if (!address || !address.street || !address.city || !address.country || !address.postalCode) {
@@ -488,7 +498,12 @@ const updateProfile = async (userId, profileData) => {
   user.kbisUrl = kbisUrl;
   user.cinRectoUrl = cinRectoUrl;
   user.cinVersoUrl = cinVersoUrl;
-  // Le statut (valide/suspendu) et le tampon (endpoint dédié) restent inchangés ici.
+
+  // Toute modification du profil d'un compte validé le remet en attente de confirmation par
+  // l'administration. Un compte suspendu reste suspendu : modifier son profil ne le réactive pas.
+  if (user.status === 'valide' && snapshot() !== before) {
+    user.status = 'en_attente_validation';
+  }
 
   await user.save();
 
@@ -663,6 +678,12 @@ const updateStamp = async (userId, stampUrl) => {
     throw err;
   }
 
+  // Remplacer un tampon existant est une modification du profil : le compte repasse en attente
+  // de confirmation. Le poser pour la première fois n'en est pas une — il est exigé pour établir
+  // les documents d'une vente en cours, qui ne doit pas être bloquée pour autant.
+  if (user.status === 'valide' && user.stampUrl && normalized && normalized !== user.stampUrl) {
+    user.status = 'en_attente_validation';
+  }
   user.stampUrl = normalized;
   await user.save();
 

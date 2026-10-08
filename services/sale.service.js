@@ -853,7 +853,7 @@ const serializeSale = (sale, stamps) => {
  */
 const listBuyerSales = async (buyerId) => {
   const [sales, buyer] = await Promise.all([
-    Sale.find({ winner: buyerId, status: { $in: ['en_cours', 'cloturee'] } })
+    Sale.find({ winner: buyerId, status: { $in: ['en_cours', 'cloturee', 'annulee'] } })
       .populate('vehicle', 'brand model year mileage registrationNumber photos')
       .populate('session', 'name endDate')
       .populate('winningOffer', 'fees')
@@ -870,6 +870,7 @@ const listBuyerSales = async (buyerId) => {
   return {
     ongoing: serialized.filter((sale) => sale.status === 'en_cours'),
     closed: serialized.filter((sale) => sale.status === 'cloturee'),
+    cancelled: serialized.filter((sale) => sale.status === 'annulee'),
   };
 };
 
@@ -1636,7 +1637,8 @@ const listSellerVehicles = async (sellerId) => {
     else state = 'en_attente';
 
     // Motif du dernier renvoi : affiché tel quel au vendeur, il vaut mieux qu'un statut.
-    const lastRefusal = (vehicle.refusals || []).slice(-1)[0] || null;
+    // Un dossier validé n'a plus rien à corriger : l'ancien refus ne doit plus s'afficher.
+    const lastRefusal = vehicle.status === 'valide' ? null : ((vehicle.refusals || []).slice(-1)[0] || null);
 
     const selectableOffers = sale?.status === 'suspendue'
       ? (selectableOffersBySale.get(String(sale._id)) || [])
@@ -2737,6 +2739,37 @@ const toggleSaleTimer = async (saleId, pause) => {
 
 const FORCE_END_SUSPENSION_NOTE = "Suspendu lors de la fin forcée d'une vente par l'administration.";
 
+const hasNextEligibleBidder = async (sale) => {
+  const candidates = sale.waitingList.filter((entry) => entry.rank > sale.currentRank && entry.status !== 'ecarte');
+  for (const candidate of candidates) {
+    const user = await User.findById(candidate.buyer).select('status').lean();
+    if (!(user && ['suspendu', 'bloque'].includes(user.status))) return true;
+  }
+  return false;
+};
+
+/**
+ * Annule la vente et remet le véhicule en attente de session. L'acheteur et le vendeur
+ * conservent la vente (statut « annulée ») pour la retrouver dans leurs ventes annulées ;
+ * sans cela le véhicule restait rattaché à sa session, dans un état introuvable.
+ */
+const cancelSaleAndReleaseVehicle = async (sale) => {
+  const current = sale.waitingList.find((entry) => entry.rank === sale.currentRank);
+  if (current && current.status !== 'ecarte') {
+    current.status = 'ecarte';
+    current.discardedAt = new Date();
+    current.discardReason = 'annulation_forcee_admin';
+  }
+  sale.status = 'annulee';
+  sale.sellerDecisionDueAt = null;
+  sale.currentStepDueAt = null;
+  sale.timerPaused = false;
+  sale.timerPausedAt = null;
+  await sale.save();
+  // Le filtre sur la session évite de détacher un véhicule déjà republié ailleurs entre-temps.
+  await VehicleDossier.updateOne({ _id: sale.vehicle, session: sale.session }, { $set: { session: null } });
+};
+
 const forceEndSale = async (saleId, suspendBuyer, suspendSeller, promoteNext) => {
   if (!mongoose.isValidObjectId(saleId)) {
     const err = new Error('Vente introuvable.');
@@ -2750,6 +2783,13 @@ const forceEndSale = async (saleId, suspendBuyer, suspendSeller, promoteNext) =>
     throw err;
   }
 
+  if (!['en_cours', 'suspendue'].includes(sale.status)) {
+    const err = new Error("Cette vente n'est plus active : elle ne peut pas être arrêtée.");
+    err.codeName = 'sale.not_active';
+    err.statusCode = 409;
+    throw err;
+  }
+
   if (suspendBuyer && sale.winner) {
     const buyer = await User.findById(sale.winner);
     if (buyer) {
@@ -2757,7 +2797,8 @@ const forceEndSale = async (saleId, suspendBuyer, suspendSeller, promoteNext) =>
       // Renseigne l'historique de suspension du compte (voir user.model.js)
       buyer.suspension = { source: 'admin', reason: 'admin', note: FORCE_END_SUSPENSION_NOTE, date: new Date() };
       await buyer.save();
-      await revokeOngoingSalesForSuspendedBuyer(buyer._id, 'suspension_admin');
+      // La vente arrêtée est traitée plus bas : la réattribuer ici ferait deux fois le travail.
+      await revokeOngoingSalesForSuspendedBuyer(buyer._id, 'suspension_admin', sale._id);
       await withdrawSuspendedSellerVehicles(buyer._id);
     }
   }
@@ -2772,11 +2813,12 @@ const forceEndSale = async (saleId, suspendBuyer, suspendSeller, promoteNext) =>
     }
   }
 
-  if (promoteNext) {
+  // Un candidat suivant n'existe que s'il est encore éligible. Sans lui, « attribuer au suivant »
+  // revient à annuler : la vente n'a pas à passer par la décision du vendeur ni par « sans gagnant ».
+  if (promoteNext && await hasNextEligibleBidder(sale)) {
     await promoteNextBidder(sale._id, 'annulation_forcee_admin');
   } else {
-    sale.status = 'annulee';
-    await sale.save();
+    await cancelSaleAndReleaseVehicle(sale);
   }
 
   return Sale.findById(saleId);

@@ -2,8 +2,10 @@ const VehicleDossier = require('../models/vehicleDossier.model');
 const User = require('../models/user.model');
 const Offer = require('../models/offer.model');
 const Sale = require('../models/sale.model');
+const Session = require('../models/session.model');
 const mongoose = require('mongoose');
 const generalConfigService = require('./generalConfig.service');
+const { buildBuyerOfferHistory } = require('../utils/offerHistory');
 
 /**
  * Suivi commercial des véhicules validés, côté administration.
@@ -323,8 +325,111 @@ const adminListVehicleSales = async (filters = {}) => {
   };
 };
 
+// Statuts d'une vente (Sale.status) : chacun est un état à part entière dans la liste des ventes.
+const SALE_STATUSES = ['en_cours', 'suspendue', 'cloturee', 'sans_gagnant', 'annulee'];
+
+const userSummary = 'companyName firstName lastName email';
+
+/** Id des utilisateurs dont le nom, le prénom ou la raison sociale contient `text`. */
+const findUserIdsByName = (text) => {
+  const regex = new RegExp(escapeRegExp(text), 'i');
+  return User.find({ $or: [{ companyName: regex }, { firstName: regex }, { lastName: regex }] }).distinct('_id');
+};
+
+/**
+ * Liste paginée des ventes — une ligne par vente, quel que soit son état (en cours, sous
+ * réserve, clôturée, sans gagnant, annulée). Contrairement à `adminListVehicleSales`, qui part
+ * des véhicules validés, celle-ci part des ventes : un véhicule remis en vente plusieurs fois
+ * y apparaît autant de fois qu'il a donné lieu à une vente.
+ *
+ * @param {object} filters
+ * @param {string|object} [filters.columnFilters] brand, model, registrationNumber, seller,
+ *   winner, session, status, currentStep, createdAt (jour)
+ * @param {number} [filters.page]
+ * @param {number} [filters.limit]
+ */
+const adminListSales = async (filters = {}) => {
+  const columnFilters = parseColumnFilters(filters.columnFilters);
+
+  const page = Math.max(1, parseInt(filters.page, 10) || 1);
+  const limit = Math.max(1, Math.min(100, parseInt(filters.limit, 10) || 20));
+
+  // Le statut est exclu de ce premier filtre : les compteurs doivent rester lisibles quand
+  // un statut est sélectionné.
+  const match = {};
+
+  const vehicleFilter = {};
+  for (const field of ['brand', 'model', 'registrationNumber']) {
+    if (columnFilters[field]) vehicleFilter[field] = new RegExp(escapeRegExp(columnFilters[field]), 'i');
+  }
+  if (Object.keys(vehicleFilter).length > 0) {
+    match.vehicle = { $in: await VehicleDossier.find(vehicleFilter).distinct('_id') };
+  }
+  if (columnFilters.seller) match.seller = { $in: await findUserIdsByName(columnFilters.seller) };
+  if (columnFilters.winner) match.winner = { $in: await findUserIdsByName(columnFilters.winner) };
+  if (columnFilters.session) {
+    match.session = { $in: await Session.find({ name: new RegExp(escapeRegExp(columnFilters.session), 'i') }).distinct('_id') };
+  }
+  if (columnFilters.currentStep && Number.isFinite(Number(columnFilters.currentStep))) {
+    match.currentStep = Number(columnFilters.currentStep);
+  }
+  if (columnFilters.createdAt) {
+    const start = new Date(`${columnFilters.createdAt}T00:00:00.000Z`);
+    const end = new Date(`${columnFilters.createdAt}T23:59:59.999Z`);
+    if (!Number.isNaN(start.getTime())) match.createdAt = { $gte: start, $lte: end };
+  }
+
+  const rowsMatch = SALE_STATUSES.includes(columnFilters.status) ? { ...match, status: columnFilters.status } : match;
+
+  const [rows, total, statusCounts] = await Promise.all([
+    Sale.find(rowsMatch)
+      .sort({ createdAt: -1, _id: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .select('vehicle session seller winner amount reservePrice status currentStep createdAt wonAt closedAt timerPaused')
+      .populate('vehicle', 'brand model registrationNumber photos')
+      .populate('session', 'name status')
+      .populate('seller', userSummary)
+      .populate('winner', userSummary)
+      .lean(),
+    Sale.countDocuments(rowsMatch),
+    Sale.aggregate([{ $match: match }, { $group: { _id: '$status', n: { $sum: 1 } } }]),
+  ]);
+
+  const sales = rows.map(({ vehicle, ...sale }) => {
+    const photos = vehicle?.photos || [];
+    const cover = photos.find((photo) => photo.isCover) || photos[0];
+    return {
+      ...sale,
+      vehicle: vehicle
+        ? {
+            _id: vehicle._id,
+            brand: vehicle.brand,
+            model: vehicle.model,
+            registrationNumber: vehicle.registrationNumber,
+            coverPhotoUrl: cover?.processedUrl || cover?.originalUrl || null,
+          }
+        : null,
+    };
+  });
+
+  const counts = SALE_STATUSES.reduce((acc, status) => ({ ...acc, [status]: 0 }), {});
+  for (const entry of statusCounts) {
+    if (entry._id in counts) counts[entry._id] = entry.n;
+  }
+
+  return {
+    sales,
+    total,
+    page,
+    limit,
+    totalPages: Math.max(1, Math.ceil(total / limit)),
+    counts,
+  };
+};
+
 /** Toutes les offres déposées pendant la session courante ou la dernière session de vente. */
-const adminListVehicleOffers = async (vehicleId) => {
+const adminListVehicleOffers = async (vehicleId, requestedSessionId = null) => {
   if (!mongoose.isValidObjectId(vehicleId)) {
     const error = new Error('Véhicule introuvable.');
     error.statusCode = 404;
@@ -346,7 +451,8 @@ const adminListVehicleOffers = async (vehicleId) => {
     .select('session winner winningOffer currentRank waitingList status')
     .populate('session', 'name startDate endDate status')
     .lean();
-  const sessionId = vehicle.session?._id || sale?.session?._id;
+  const sessionId = (requestedSessionId && mongoose.isValidObjectId(requestedSessionId) ? requestedSessionId : null)
+    || vehicle.session?._id || sale?.session?._id;
   const waitingByOffer = new Map((sale?.waitingList || []).map((entry) => [String(entry.offer), entry]));
 
   const offers = sessionId
@@ -356,13 +462,24 @@ const adminListVehicleOffers = async (vehicleId) => {
         .lean()
     : [];
 
+  // Historique par acheteur : une offre annulée puis redéposée forme deux documents, mais une
+  // seule histoire pour l'acheteur dans cette session.
+  const offersByBuyer = new Map();
+  for (const offer of offers) {
+    const key = String(offer.buyer?._id || offer.buyer);
+    offersByBuyer.set(key, [...(offersByBuyer.get(key) || []), offer]);
+  }
+
   return {
     vehicle: { ...vehicle, session: vehicle.session || sale?.session || null },
     sale: sale ? { _id: sale._id, status: sale.status } : null,
     offers: offers.map((offer) => {
       const waitingEntry = waitingByOffer.get(String(offer._id));
+      const history = buildBuyerOfferHistory(offersByBuyer.get(String(offer.buyer?._id || offer.buyer)) || [offer]);
       return {
         ...offer,
+        history,
+        hasHistory: history.length > 1,
         rank: waitingEntry?.rank || null,
         attributionStatus: waitingEntry?.status || null,
         discardReason: waitingEntry?.discardReason || null,
@@ -427,7 +544,9 @@ const adminListMaxedOutVehicles = async ({ limit } = {}) => {
 
 module.exports = {
   adminListVehicleSales,
+  adminListSales,
   adminListVehicleOffers,
   adminListMaxedOutVehicles,
   SALE_STATES,
+  SALE_STATUSES,
 };

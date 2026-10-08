@@ -50,9 +50,13 @@ const offerSchema = new mongoose.Schema({
   // des modifications faites par l'acheteur pendant la session.
   revisions: [{
     amount: { type: Number, required: true, min: 0 },
+    // Date à laquelle ce montant avait été proposé (absente des offres modifiées avant son ajout)
+    proposedAt: { type: Date },
     fees: { type: offerFeesSchema, required: true },
     replacedAt: { type: Date, default: Date.now }
   }],
+  // Date de la version courante du montant : le dépôt, ou la dernière modification
+  amountUpdatedAt: { type: Date, default: Date.now },
   status: {
     type: String,
     enum: ['active', 'annulee'],

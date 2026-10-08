@@ -246,7 +246,14 @@ const updateOffer = async ({ offerId, buyerId, amount }) => {
   const offer = await loadEditableOffer(offerId, buyerId);
   const quote = await quoteOffer({ vehicleId: String(offer.vehicle), amount });
 
-  offer.revisions.push({ amount: offer.amount, fees: offer.fees, replacedAt: new Date() });
+  const now = new Date();
+  offer.revisions.push({
+    amount: offer.amount,
+    fees: offer.fees,
+    proposedAt: offer.amountUpdatedAt || (offer.revisions.length > 0 ? offer.revisions[offer.revisions.length - 1].replacedAt : offer.createdAt),
+    replacedAt: now,
+  });
+  offer.amountUpdatedAt = now;
   offer.amount = quote.amount;
   offer.fees = {
     commission: quote.commission,

@@ -48,7 +48,8 @@ const LAYOUT = {
     registrationCardNo: { x: 291, y: 554 },
     registrationCardDate: { x: 145, y: 535 },
     formulaNumber: { x: 322, y: 535 },
-    registrationCardMissingMotif: { x: 142, y: 512 },
+    // Ligne « Si non, veuillez préciser le motif : » (et non sous « Date du certificat »)
+    registrationCardMissingMotif: { x: 168, y: 491 },
   },
   // Bloc bas : certificat de vente, rempli par l'ancien propriétaire (le vendeur)
   seller: {

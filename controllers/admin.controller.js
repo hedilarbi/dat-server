@@ -1,6 +1,7 @@
 const adminService = require('../services/admin.service');
 const notificationService = require('../services/notification.service');
 const saleService = require('../services/sale.service');
+const adminVehicleSalesService = require('../services/adminVehicleSales.service');
 
 const getUsers = async (req, res, next) => {
   try {
@@ -98,6 +99,16 @@ const getDashboardStats = async (req, res, next) => {
   try {
     const stats = await adminService.getDashboardStats();
     res.status(200).json({ success: true, data: stats });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const listSales = async (req, res, next) => {
+  try {
+    const { columnFilters, page, limit } = req.query;
+    const result = await adminVehicleSalesService.adminListSales({ columnFilters, page, limit });
+    res.status(200).json({ success: true, ...result });
   } catch (error) {
     next(error);
   }
@@ -216,6 +227,7 @@ module.exports = {
   markNotificationAsRead,
   markAllNotificationsAsRead,
   getDashboardStats,
+  listSales,
   getSale,
   toggleSaleTimer,
   forceEndSale,

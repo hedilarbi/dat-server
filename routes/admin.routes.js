@@ -23,6 +23,7 @@ router.put('/notifications/read-all', adminController.markAllNotificationsAsRead
 router.put('/notifications/:id/read', adminController.markNotificationAsRead);
 
 // Gestion des ventes par l'admin
+router.get('/sales', adminController.listSales);
 router.get('/sales/:id', adminController.getSale);
 router.put('/sales/:id/timer', adminController.toggleSaleTimer);
 router.put('/sales/:id/force-end', adminController.forceEndSale);

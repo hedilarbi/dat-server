@@ -36,7 +36,7 @@ const listVehicleSales = async (req, res, next) => {
 
 const listVehicleOffers = async (req, res, next) => {
   try {
-    const result = await adminVehicleSalesService.adminListVehicleOffers(req.params.id);
+    const result = await adminVehicleSalesService.adminListVehicleOffers(req.params.id, req.query.session);
     res.status(200).json({ success: true, ...result });
   } catch (error) {
     next(error);
@@ -45,8 +45,8 @@ const listVehicleOffers = async (req, res, next) => {
 
 const listDossiers = async (req, res, next) => {
   try {
-    const { status, columnFilters, page, limit } = req.query;
-    const result = await vehicleDossierService.adminListDossiers({ status, columnFilters, page, limit });
+    const { status, excludeStatus, columnFilters, page, limit } = req.query;
+    const result = await vehicleDossierService.adminListDossiers({ status, excludeStatus, columnFilters, page, limit });
     res.status(200).json({ success: true, ...result });
   } catch (error) {
     next(error);

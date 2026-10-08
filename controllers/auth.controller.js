@@ -231,7 +231,8 @@ const logout = async (req, res, next) => {
 };
 
 /**
- * Mettre à jour son profil (compte déjà validé/suspendu) : n'affecte pas le statut du compte.
+ * Mettre à jour son profil (compte déjà validé/suspendu). Une modification réelle d'un compte
+ * validé le remet en attente de validation ; un compte suspendu garde son statut.
  */
 const updateProfile = async (req, res, next) => {
   try {

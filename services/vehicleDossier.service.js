@@ -222,7 +222,7 @@ const createDossier = async (sellerId, payload) => {
         registrationNumber: new RegExp(`^${cleanReg}$`, 'i')
       });
       if (existing) {
-        const error = new Error(`Un dossier véhicule existe déjà avec le matricule / immatriculation « ${fields.registrationNumber} ».`);
+        const error = new Error(`Un dossier véhicule existe déjà avec l'immatriculation « ${fields.registrationNumber} ».`);
         error.statusCode = 400;
         error.codeName = 'vehicleDossier.registration_number_exists';
         throw error;
@@ -279,7 +279,7 @@ const updateDossier = async (dossierId, sellerId, payload) => {
 
   const fields = pickEditableFields(payload);
   if (fields.registrationNumber !== undefined && (fields.registrationNumber || '') !== (dossier.registrationNumber || '')) {
-    const error = new Error("Le matricule d'un dossier véhicule existant ne peut pas être modifié.");
+    const error = new Error("L'immatriculation d'un dossier véhicule existant ne peut pas être modifiée.");
     error.statusCode = 403;
     error.codeName = 'vehicleDossier.registration_number_immutable';
     throw error;
@@ -366,6 +366,12 @@ const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const adminListDossiers = async (filters = {}) => {
   const query = {};
   if (filters.status && filters.status !== 'all') query.status = filters.status;
+  // Onglet « Dossiers véhicules » : tout ce qui n'est pas encore validé. Les véhicules validés
+  // ont leur propre onglet (adminVehicleSales.service.js). Un statut explicite l'emporte.
+  if (filters.excludeStatus && !query.status) {
+    const excluded = String(filters.excludeStatus).split(',').map((v) => v.trim()).filter(Boolean);
+    if (excluded.length > 0) query.status = { $nin: excluded };
+  }
 
   let columnFilters = {};
   if (filters.columnFilters) {
