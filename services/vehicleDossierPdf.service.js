@@ -14,8 +14,13 @@ const getStandardFontDataUrl = () => {
   if (cachedStandardFontDataUrl) return cachedStandardFontDataUrl;
   try {
     const pdfjsPackage = require.resolve('pdfjs-dist/package.json');
+    // Chemin disque (avec « / » final) et non URL « file:// » : sous Node, pdfjs lit ces polices
+    // avec fs, qui refuse une URL file:// transmise sous forme de chaîne. Les polices standard
+    // (Helvetica, Arial, Times…) n'étaient alors jamais chargées : sur un serveur sans polices
+    // système, le texte des PDF qui ne les intègrent pas (tableaux, rapports générés) disparaissait
+    // du rendu, ne laissant que le tracé des traits.
     const fontsDir = path.resolve(path.dirname(pdfjsPackage), 'standard_fonts');
-    cachedStandardFontDataUrl = pathToFileURL(fontsDir + '/').href;
+    cachedStandardFontDataUrl = fontsDir + path.sep;
   } catch (_err) {
     cachedStandardFontDataUrl = 'https://unpkg.com/pdfjs-dist@4.10.38/standard_fonts/';
   }

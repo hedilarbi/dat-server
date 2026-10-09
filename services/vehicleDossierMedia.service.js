@@ -34,12 +34,11 @@ const applyBlur = async (imageUrl, zones, req) => {
     error.codeName = 'vehicleDossier.image_fetch_failed';
     throw error;
   }
-  const buffer = Buffer.from(await sourceRes.arrayBuffer());
+  let buffer = Buffer.from(await sourceRes.arrayBuffer());
 
-  let image = sharp(buffer);
   let metadata;
   try {
-    metadata = await image.metadata();
+    metadata = await sharp(buffer).metadata();
   } catch {
     const error = new Error("Ce format d'image n'est pas pris en charge pour le floutage.");
     error.statusCode = 400;
@@ -47,7 +46,25 @@ const applyBlur = async (imageUrl, zones, req) => {
     throw error;
   }
 
-  const { width, height, format } = metadata;
+  const { format } = metadata;
+
+  // Les photos de téléphone sont souvent stockées « couchées » avec une balise EXIF qui demande
+  // de les afficher debout. L'éditeur de flou travaille sur l'image affichée (debout) ; il faut
+  // donc appliquer la rotation avant de placer les zones, sinon elles tombent à côté et l'image
+  // finale ressort en paysage.
+  let width;
+  let height;
+  try {
+    const oriented = await sharp(buffer).rotate().toBuffer({ resolveWithObject: true });
+    buffer = oriented.data;
+    width = oriented.info.width;
+    height = oriented.info.height;
+  } catch {
+    const error = new Error("Ce format d'image n'est pas pris en charge pour le floutage.");
+    error.statusCode = 400;
+    error.codeName = 'vehicleDossier.blur_unsupported_format';
+    throw error;
+  }
   if (!width || !height) {
     const error = new Error("Impossible de déterminer les dimensions de l'image.");
     error.statusCode = 400;
