@@ -196,6 +196,103 @@ const approvalEmail = (user) => {
   };
 };
 
+/** Modifications de profil approuvées : le compte était déjà validé, rien n'est à refaire. */
+const profileChangeApprovedEmail = (user) => {
+  const lang = normalizeLanguage(user.language);
+  const loginUrl = getRoleLoginUrl(user);
+  const copy = {
+    fr: {
+      subject: 'Vos modifications ont été validées - DealAutoPro',
+      heading: 'Modifications validées',
+      hello: `Bonjour ${user.firstName} ${user.lastName},`,
+      line1: 'Votre demande de modification de compte a été validée : vos nouvelles informations sont désormais prises en compte.',
+      line2: 'Votre accès complet à la plateforme est rétabli.',
+      cta: 'Accéder à mon espace',
+      text: `Votre demande de modification de compte a été validée. Votre accès complet est rétabli : ${loginUrl}`,
+      footer: "L'équipe DealAutoPro"
+    },
+    en: {
+      subject: 'Your changes have been approved - DealAutoPro',
+      heading: 'Changes approved',
+      hello: `Hello ${user.firstName} ${user.lastName},`,
+      line1: 'Your account update request has been approved: your new information is now in effect.',
+      line2: 'Your full access to the platform has been restored.',
+      cta: 'Open my workspace',
+      text: `Your account update request has been approved. Your full access is restored: ${loginUrl}`,
+      footer: 'The DealAutoPro team'
+    }
+  }[lang];
+  return {
+    subject: copy.subject,
+    text: copy.text,
+    html: layout({
+      heading: copy.heading,
+      footer: copy.footer,
+      body: `
+        <p style="color: #1A2230; font-size: 16px;">${copy.hello}</p>
+        <p style="color: #5A5E66; font-size: 14px;">${copy.line1}</p>
+        <p style="color: #5A5E66; font-size: 14px;">${copy.line2}</p>
+        <div style="text-align: center; margin: 30px 0;">
+          <a href="${loginUrl}" style="background-color: #13243C; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold;">${copy.cta}</a>
+        </div>
+      `
+    })
+  };
+};
+
+/** Modifications de profil refusées : l'ancien profil, déjà validé, reste en vigueur. */
+const profileChangeRejectedEmail = ({ user, reasonsText, reasonsPlain, comment }) => {
+  const lang = normalizeLanguage(user.language);
+  const loginUrl = getRoleLoginUrl(user);
+  const copy = {
+    fr: {
+      subject: 'Votre demande de modification n’a pas été acceptée - DealAutoPro',
+      heading: 'Demande de modification refusée',
+      hello: `Bonjour ${user.firstName} ${user.lastName},`,
+      line1: 'Après examen, votre demande de modification de compte n’a pas pu être acceptée. Vos informations précédentes, déjà validées, restent en vigueur et votre accès à la plateforme est rétabli.',
+      reasons: 'Motifs :',
+      comment: "Commentaire de l'administrateur :",
+      line2: 'Vous pouvez effectuer une nouvelle demande depuis votre profil en tenant compte de ces remarques.',
+      cta: 'Accéder à mon espace',
+      text: `Votre demande de modification de compte n'a pas été acceptée : ${reasonsPlain}. Commentaire : ${comment || ''}. Vos informations précédentes restent en vigueur : ${loginUrl}`,
+      footer: "L'équipe DealAutoPro"
+    },
+    en: {
+      subject: 'Your update request was not accepted - DealAutoPro',
+      heading: 'Update request declined',
+      hello: `Hello ${user.firstName} ${user.lastName},`,
+      line1: 'After review, your account update request could not be accepted. Your previous, already validated information remains in effect and your access to the platform has been restored.',
+      reasons: 'Reasons:',
+      comment: 'Administrator comment:',
+      line2: 'You can submit a new request from your profile, taking these remarks into account.',
+      cta: 'Open my workspace',
+      text: `Your account update request was not accepted: ${reasonsPlain}. Comment: ${comment || ''}. Your previous information remains in effect: ${loginUrl}`,
+      footer: 'The DealAutoPro team'
+    }
+  }[lang];
+  return {
+    subject: copy.subject,
+    text: copy.text,
+    html: layout({
+      heading: copy.heading,
+      footer: copy.footer,
+      body: `
+        <p style="color: #1A2230; font-size: 16px;">${copy.hello}</p>
+        <p style="color: #5A5E66; font-size: 14px;">${copy.line1}</p>
+        <div style="background-color: #F1EFE8; border-left: 4px solid #9A3B2F; padding: 15px; margin: 20px 0;">
+          <strong style="color: #9A3B2F;">${copy.reasons}</strong><br>
+          <p style="color: #1A2230; margin: 5px 0;">${reasonsText}</p>
+          ${comment ? `<br><strong style="color: #5A5E66;">${copy.comment}</strong><p style="color: #1A2230; margin: 5px 0; font-style: italic;">"${comment}"</p>` : ''}
+        </div>
+        <p style="color: #5A5E66; font-size: 14px;">${copy.line2}</p>
+        <div style="text-align: center; margin: 30px 0;">
+          <a href="${loginUrl}" style="background-color: #13243C; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold;">${copy.cta}</a>
+        </div>
+      `
+    })
+  };
+};
+
 const rejectionEmail = ({ user, reasonsText, reasonsPlain, comment }) => {
   const lang = normalizeLanguage(user.language);
   const loginUrl = getRoleLoginUrl(user);
@@ -1455,6 +1552,8 @@ module.exports = {
   otpEmail,
   passwordResetEmail,
   approvalEmail,
+  profileChangeApprovedEmail,
+  profileChangeRejectedEmail,
   rejectionEmail,
   correctionEmail,
   dossierApprovalEmail,

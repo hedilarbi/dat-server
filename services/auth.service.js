@@ -3,6 +3,7 @@ const jwt = require('jsonwebtoken');
 const { isValidPhoneNumber } = require('libphonenumber-js');
 const { sendEmail } = require('../config/mail');
 const { createAdminRegistrationNotification } = require('./notification.service');
+const { buildProfileChanges, applyProfileChanges } = require('../utils/profileChanges');
 const { normalizeLanguage, otpEmail, passwordResetEmail } = require('./emailTemplates.service');
 const paymentService = require('./payment.service');
 const { isStripeConfigured } = require('../config/stripe');
@@ -427,16 +428,6 @@ const updateProfile = async (userId, profileData) => {
     throw err;
   }
 
-  // Photographie des champs du profil avant modification, pour savoir si quelque chose a
-  // réellement changé : renvoyer le formulaire tel quel ne doit pas faire perdre la validation.
-  const snapshot = () => JSON.stringify([
-    user.firstName, user.lastName, user.companyName, user.activityType, user.phone,
-    user.address?.street, user.address?.postalCode, user.address?.city, user.address?.country,
-    user.siret, user.kbisUrl, user.cinRectoUrl, user.cinVersoUrl, user.vhuNumber,
-    user.bankInfo?.bankName, user.bankInfo?.accountHolder, user.bankInfo?.iban, user.bankInfo?.bic, user.bankInfo?.ribUrl,
-  ].map((value) => (value == null ? '' : String(value).trim())));
-  const before = snapshot();
-
   const { firstName, lastName, companyName, activityType, phone, address, siret, kbisUrl, cinRectoUrl, cinVersoUrl, vhuNumber, bankInfo } = profileData;
 
   if (!address || !address.street || !address.city || !address.country || !address.postalCode) {
@@ -499,51 +490,53 @@ const updateProfile = async (userId, profileData) => {
     throw err;
   }
 
-  if (user.role === 'vendeur') {
-    if (!bankInfo || !bankInfo.bankName || !bankInfo.accountHolder || !bankInfo.iban || !bankInfo.bic) {
-      const err = new Error('Les coordonnées bancaires complètes sont obligatoires pour un vendeur.');
-      err.codeName = 'auth.bank_info_missing';
-      throw err;
+  if (user.role === 'vendeur' && (!bankInfo || !bankInfo.bankName || !bankInfo.accountHolder || !bankInfo.iban || !bankInfo.bic)) {
+    const err = new Error('Les coordonnées bancaires complètes sont obligatoires pour un vendeur.');
+    err.codeName = 'auth.bank_info_missing';
+    throw err;
+  }
+
+  // Ce que le titulaire demande. Un champ laissé vide garde sa valeur actuelle.
+  const proposed = {
+    firstName: firstName || user.firstName,
+    lastName: lastName || user.lastName,
+    companyName: companyName || user.companyName,
+    activityType: activityType || user.activityType,
+    phone: phone || user.phone,
+    address,
+    siret: cleanSiret,
+    kbisUrl,
+    cinRectoUrl,
+    cinVersoUrl,
+    ...(user.role === 'vendeur' ? {
+      vhuNumber: vhuNumber || user.vhuNumber,
+      bankInfo: {
+        bankName: bankInfo.bankName,
+        accountHolder: bankInfo.accountHolder,
+        iban: bankInfo.iban,
+        bic: bankInfo.bic,
+        // Un compte déjà validé a nécessairement déjà un RIB : ne jamais l'effacer si absent du payload
+        ribUrl: bankInfo.ribUrl || user.bankInfo?.ribUrl,
+      },
+    } : {}),
+  };
+  const changes = buildProfileChanges(user, proposed);
+
+  if (Object.keys(changes).length > 0) {
+    if (user.status === 'valide') {
+      // Compte validé : rien n'est intégré au profil. Les modifications sont mises de côté, le compte
+      // passe en « soumis » (statut que l'administration traite) et l'admin approuve ou refuse.
+      user.pendingProfile = { changes, submittedAt: new Date() };
+      user.status = 'soumis';
+      user.profileChangePending = true;
+      await user.save();
+      await cancelLiveOffersOf(user._id);
+      await notifyAdminProfileModified(user);
+    } else {
+      // Compte suspendu : il garde son statut et ses modifications s'appliquent directement
+      applyProfileChanges(user, changes);
+      await user.save();
     }
-
-    user.bankInfo = {
-      bankName: bankInfo.bankName,
-      accountHolder: bankInfo.accountHolder,
-      iban: bankInfo.iban,
-      bic: bankInfo.bic,
-      // Un compte déjà validé a nécessairement déjà un RIB : ne jamais l'effacer si absent du payload
-      ribUrl: bankInfo.ribUrl || user.bankInfo?.ribUrl
-    };
-
-    if (vhuNumber) user.vhuNumber = vhuNumber;
-  }
-
-  if (firstName) user.firstName = firstName;
-  if (lastName) user.lastName = lastName;
-  if (companyName) user.companyName = companyName;
-  if (activityType) user.activityType = activityType;
-  if (phone) user.phone = phone;
-
-  user.address = address;
-  user.siret = cleanSiret;
-  user.kbisUrl = kbisUrl;
-  user.cinRectoUrl = cinRectoUrl;
-  user.cinVersoUrl = cinVersoUrl;
-
-  // Toute modification du profil d'un compte validé le remet en attente de confirmation par
-  // l'administration. Un compte suspendu reste suspendu : modifier son profil ne le réactive pas.
-  // Statut « soumis » : c'est celui que l'administration traite (compteur, filtre « en attente »,
-  // boutons Valider / Refuser) ; « en_attente_validation » n'y est pas reconnu.
-  const profileChanged = user.status === 'valide' && snapshot() !== before;
-  if (profileChanged) {
-    user.status = 'soumis';
-    user.profileChangePending = true;
-  }
-
-  await user.save();
-  if (profileChanged) {
-    await cancelLiveOffersOf(user._id);
-    await notifyAdminProfileModified(user);
   }
 
   const userObj = user.toObject();
@@ -717,24 +710,36 @@ const updateStamp = async (userId, stampUrl) => {
     throw err;
   }
 
-  // Remplacer un tampon existant est une modification du profil : le compte repasse en attente
-  // de confirmation. Le poser pour la première fois n'en est pas une — il est exigé pour établir
-  // les documents d'une vente en cours, qui ne doit pas être bloquée pour autant.
-  const stampReplaced = user.status === 'valide' && user.stampUrl && normalized && normalized !== user.stampUrl;
-  if (stampReplaced) {
-    user.status = 'soumis';
-    user.profileChangePending = true;
-  }
-  user.stampUrl = normalized;
-  await user.save();
-  if (stampReplaced) {
-    await cancelLiveOffersOf(user._id);
-    await notifyAdminProfileModified(user);
+  // Remplacer un tampon existant est une modification du profil : le nouveau tampon est mis de côté
+  // jusqu'à la décision de l'admin (l'ancien reste utilisé pour les documents). Le poser pour la
+  // première fois n'en est pas une — il est exigé pour établir les documents d'une vente en cours,
+  // qui ne doit pas être bloquée pour autant.
+  const replacesStamp = Boolean(user.stampUrl && normalized && normalized !== user.stampUrl);
+  const staged = replacesStamp && (user.status === 'valide' || user.profileChangePending);
+  if (staged) {
+    const firstRequest = user.status === 'valide';
+    user.pendingProfile = {
+      changes: { ...(user.pendingProfile?.changes || {}), stampUrl: normalized },
+      submittedAt: user.pendingProfile?.submittedAt || new Date(),
+    };
+    user.markModified('pendingProfile');
+    if (firstRequest) {
+      user.status = 'soumis';
+      user.profileChangePending = true;
+    }
+    await user.save();
+    if (firstRequest) {
+      await cancelLiveOffersOf(user._id);
+      await notifyAdminProfileModified(user);
+    }
+  } else {
+    user.stampUrl = normalized;
+    await user.save();
   }
 
   // Étape 3.2 : les documents des ventes qui n'attendaient plus que ce tampon sont générés.
   // Chargé à l'appel : sale.service charge lui-même des services qui dépendent de celui-ci.
-  if (normalized) {
+  if (normalized && !staged) {
     try {
       await require('./sale.service').prepareDocumentsForUser(user._id);
     } catch (error) {

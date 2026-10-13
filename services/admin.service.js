@@ -5,7 +5,8 @@ const Ticket = require('../models/ticket.model');
 const Session = require('../models/session.model');
 const Sale = require('../models/sale.model');
 const { sendEmail } = require('../config/mail');
-const { normalizeLanguage, approvalEmail, rejectionEmail, correctionEmail } = require('./emailTemplates.service');
+const { normalizeLanguage, approvalEmail, profileChangeApprovedEmail, profileChangeRejectedEmail, rejectionEmail, correctionEmail } = require('./emailTemplates.service');
+const { applyProfileChanges } = require('../utils/profileChanges');
 const notificationService = require('./notification.service');
 
 // expo-server-sdk v6 ships as an ES Module ("type": "module"); require()-ing it crashes on
@@ -141,6 +142,62 @@ const getUsers = async (filters = {}) => {
 };
 
 /**
+ * Avant d'intégrer des modifications de profil approuvées : SIRET, raison sociale et téléphone ne
+ * doivent pas avoir été pris par un autre compte entre la demande et la décision.
+ */
+const assertProfileChangesAvailable = async (user, changes) => {
+  const conflict = async (query, message, codeName) => {
+    if (await User.exists({ ...query, _id: { $ne: user._id } })) {
+      const err = new Error(message);
+      err.codeName = codeName;
+      err.statusCode = 409;
+      throw err;
+    }
+  };
+  if (changes.siret) await conflict({ siret: changes.siret }, 'Ce numéro SIRET est désormais utilisé par un autre compte : ces modifications ne peuvent plus être approuvées.', 'admin.siret_conflict');
+  if (changes.phone) await conflict({ phone: changes.phone }, 'Ce numéro de téléphone est désormais utilisé par un autre compte : ces modifications ne peuvent plus être approuvées.', 'admin.phone_conflict');
+  if (changes.companyName) {
+    const escaped = changes.companyName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    await conflict({ companyName: new RegExp(`^${escaped}$`, 'i') }, 'Cette raison sociale est désormais utilisée par un autre compte : ces modifications ne peuvent plus être approuvées.', 'admin.company_conflict');
+  }
+};
+
+/**
+ * Refus (ou demande de correction) d'une demande de modification de profil : les modifications
+ * mises de côté sont abandonnées, l'ancien profil — déjà validé — reste en vigueur et le compte
+ * retrouve son accès. Ce n'est pas un refus d'inscription : le compte n'est jamais « refusé ».
+ */
+const discardProfileChange = async (user, { motifs, comment }) => {
+  const reasons = await RefusalReason.find({ key: { $in: motifs } });
+  const language = normalizeLanguage(user.language);
+  const reasonMessages = reasons.length > 0
+    ? reasons.map((r) => r.message[language] || r.message.fr || r.key)
+    : motifs;
+  const reasonsText = reasonMessages.map((text) => `- ${text}`).join('<br>');
+  const reasonsPlain = reasonMessages.join(', ');
+
+  user.status = 'valide';
+  user.hasBeenValidated = true;
+  user.profileChangePending = false;
+  user.pendingProfile = undefined;
+  await user.save();
+
+  try {
+    await sendEmail({ to: user.email, ...profileChangeRejectedEmail({ user, reasonsText, reasonsPlain, comment }) });
+    if (user.role === 'vendeur') await notificationService.createSellerNotification({
+      sellerId: user._id, type: 'profile_change_rejected', category: 'inscription',
+      title: 'Modification de compte refusée', message: `Votre demande de modification n'a pas été acceptée : ${reasonsPlain}.`
+    });
+  } catch (emailError) {
+    console.error(`Erreur d'envoi du mail de refus de modification : ${emailError.message}`);
+  }
+
+  const userObj = user.toObject();
+  delete userObj.password;
+  return userObj;
+};
+
+/**
  * Valider l'inscription d'un utilisateur (acheteur ou vendeur)
  */
 const approveUser = async (userId) => {
@@ -151,6 +208,15 @@ const approveUser = async (userId) => {
     throw err;
   }
 
+  // Demande de modification : les modifications mises de côté s'intègrent au profil à l'approbation
+  const wasProfileChange = Boolean(user.profileChangePending);
+  const pendingChanges = user.pendingProfile?.changes;
+  if (wasProfileChange && pendingChanges && Object.keys(pendingChanges).length > 0) {
+    await assertProfileChangesAvailable(user, pendingChanges);
+    applyProfileChanges(user, pendingChanges);
+  }
+  user.pendingProfile = undefined;
+
   user.status = 'valide';
   user.hasBeenValidated = true;
   user.profileChangePending = false;
@@ -160,7 +226,7 @@ const approveUser = async (userId) => {
   try {
     await sendEmail({
       to: user.email,
-      ...approvalEmail(user)
+      ...(wasProfileChange ? profileChangeApprovedEmail(user) : approvalEmail(user))
     });
     if (user.role === 'vendeur') await notificationService.createSellerNotification({
       sellerId: user._id, type: 'account_approved', category: 'inscription',
@@ -213,6 +279,8 @@ const rejectUser = async (userId, { motifs, comment }) => {
     err.codeName = 'admin.user_not_found';
     throw err;
   }
+
+  if (user.profileChangePending) return discardProfileChange(user, { motifs, comment });
 
   // Chercher les messages des motifs (pour l'e-mail et l'historique affiché à l'utilisateur)
   const reasons = await RefusalReason.find({ key: { $in: motifs } });
@@ -294,6 +362,8 @@ const requestCorrection = async (userId, { motifs, comment }) => {
     err.codeName = 'admin.user_not_found';
     throw err;
   }
+
+  if (user.profileChangePending) return discardProfileChange(user, { motifs, comment });
 
   const reasons = await RefusalReason.find({ key: { $in: motifs } });
   const language = normalizeLanguage(user.language);

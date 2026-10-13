@@ -102,6 +102,12 @@ const userSchema = new mongoose.Schema({
   // Le compte a déjà été validé au moins une fois : toute nouvelle attente de validation est alors une
   // demande de modification de compte, et non une inscription (textes affichés au titulaire).
   hasBeenValidated: { type: Boolean, default: false },
+  // Modifications de profil demandées par un compte validé, mises de côté jusqu'à la décision de
+  // l'admin : le profil en vigueur reste inchangé tant qu'elles ne sont pas approuvées.
+  pendingProfile: {
+    changes: { type: mongoose.Schema.Types.Mixed, default: undefined },
+    submittedAt: { type: Date },
+  },
   // Email verification & OTP
   emailVerified: {
     type: Boolean,
