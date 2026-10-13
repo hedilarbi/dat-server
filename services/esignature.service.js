@@ -8,6 +8,10 @@ const CLIENT_BASE_URL = (process.env.CLIENT_BASE_URL || 'https://dealautopro.com
 
 // La documentation OpenAPI ne décrit que l'état NEW d'un signataire : on reconnaît les libellés
 // de fin usuels, et une signature entièrement terminée (DONE) vaut pour tous les signataires.
+// Sans délai maximum, une plateforme de signature qui ne répond pas laisserait les requêtes (et les
+// pages qui les attendent, comme le retour de signature) en attente indéfiniment.
+const REQUEST_TIMEOUT_MS = 15000;
+
 const SIGNER_DONE_STATES = ['SIGNED', 'DONE', 'COMPLETED'];
 const loggedSignerStates = new Set();
 
@@ -113,6 +117,7 @@ const createSignatureSession = async ({ saleId, seller, buyer, bundleBuffer, dec
 
   try {
     const response = await axios.post(`${esignatureBaseUrl}/EU-SES`, payload, {
+      timeout: REQUEST_TIMEOUT_MS,
       headers: {
         'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json'
@@ -157,6 +162,7 @@ const fetchSignedDocument = async (signatureId) => {
   const esignatureBaseUrl = requiredUrl('ESIGNATURE_BASE_URL');
   try {
     const response = await axios.get(`${esignatureBaseUrl}/signatures/${signatureId}/signedDocument`, {
+      timeout: REQUEST_TIMEOUT_MS,
       headers: {
         'Authorization': `Bearer ${token}`
       },
@@ -176,6 +182,7 @@ const fetchAuditTrail = async (signatureId) => {
 
   const esignatureBaseUrl = requiredUrl('ESIGNATURE_BASE_URL');
   const response = await axios.get(`${esignatureBaseUrl}/signatures/${signatureId}/audit`, {
+    timeout: REQUEST_TIMEOUT_MS,
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/pdf' },
     responseType: 'arraybuffer',
   });
@@ -194,6 +201,7 @@ const fetchSignatureProgress = async (signatureId) => {
 
   const esignatureBaseUrl = requiredUrl('ESIGNATURE_BASE_URL');
   const response = await axios.get(`${esignatureBaseUrl}/signatures/${signatureId}/detail`, {
+    timeout: REQUEST_TIMEOUT_MS,
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
   });
   // Selon les endpoints, l'API renvoie l'objet directement ou l'enveloppe dans { data }.

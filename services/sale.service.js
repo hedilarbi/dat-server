@@ -2997,7 +2997,12 @@ const syncSignatureForUser = async (saleId, userId) => {
   }
 
   try {
-    await refreshSignatureProgress(sale._id);
+    // Le retour de signature attend cette réponse pour renvoyer l'utilisateur sur sa vente : on ne
+    // l'immobilise pas plus de 8 s, la tâche de fond relira la signature si besoin.
+    await Promise.race([
+      refreshSignatureProgress(sale._id),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('délai dépassé')), 8000)),
+    ]);
   } catch (error) {
     // OpenAPI indisponible : la page affiche l'état connu, la tâche de fond reprendra.
     console.error(`Relecture de la signature impossible (vente ${sale._id}) : ${error.message}`);
