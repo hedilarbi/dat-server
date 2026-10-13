@@ -99,6 +99,9 @@ const userSchema = new mongoose.Schema({
   // l'admin valide ces modifications. Distingue ce cas d'une première inscription — le titulaire
   // garde la main sur ses ventes en cours mais ne peut lancer aucune nouvelle action.
   profileChangePending: { type: Boolean, default: false },
+  // Le compte a déjà été validé au moins une fois : toute nouvelle attente de validation est alors une
+  // demande de modification de compte, et non une inscription (textes affichés au titulaire).
+  hasBeenValidated: { type: Boolean, default: false },
   // Email verification & OTP
   emailVerified: {
     type: Boolean,

@@ -152,6 +152,7 @@ const approveUser = async (userId) => {
   }
 
   user.status = 'valide';
+  user.hasBeenValidated = true;
   user.profileChangePending = false;
   await user.save();
 
