@@ -95,6 +95,10 @@ const userSchema = new mongoose.Schema({
     enum: ['brouillon', 'soumis', 'en_attente_validation', 'refuse', 'correction_demandee', 'valide', 'suspendu', 'bloque'],
     default: 'brouillon'
   },
+  // Compte validé dont le titulaire a modifié son profil : il repasse en « soumis » le temps que
+  // l'admin valide ces modifications. Distingue ce cas d'une première inscription — le titulaire
+  // garde la main sur ses ventes en cours mais ne peut lancer aucune nouvelle action.
+  profileChangePending: { type: Boolean, default: false },
   // Email verification & OTP
   emailVerified: {
     type: Boolean,

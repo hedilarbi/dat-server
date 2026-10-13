@@ -10,9 +10,9 @@ const { attachUserIfAuthenticated } = require('../middlewares/auth.middleware');
 const router = express.Router();
 const showcaseService = require('../services/showcase.service');
 
-router.get('/showcase', async (req, res, next) => {
+router.get('/showcase', attachUserIfAuthenticated, async (req, res, next) => {
   try {
-    res.json({ vehicles: await showcaseService.listPublicShowcase() });
+    res.json({ vehicles: await showcaseService.listPublicShowcase(req.user) });
   } catch (error) { next(error); }
 });
 
@@ -185,7 +185,7 @@ router.get('/vehicles/:id', attachUserIfAuthenticated, async (req, res) => {
         'firstRegistrationDate', 'vehicleGenre', 'fiscalPower', 'bodyType', 'gearbox',
         'passengerCount', 'doorCount', 'color', 'vrade', 'procedure', 'registrationCardAvailable',
         'identificationSheetAvailable', 'description', 'conditionDetails', 'listingCount',
-        'photos', 'session', 'lotNumber', 'seller',
+        'photos', 'session', 'lotNumber', 'seller', 'showcaseOrder',
       ].join(' '))
       .lean();
 
@@ -200,7 +200,9 @@ router.get('/vehicles/:id', attachUserIfAuthenticated, async (req, res) => {
           .lean()
       : null;
 
-    if (!session) {
+    // Hors session, seul un véhicule de la vitrine reste consultable (sans offre possible)
+    const inShowcase = dossier.showcaseOrder !== null && dossier.showcaseOrder !== undefined;
+    if (!session && !inShowcase) {
       return res.status(404).json({ message: 'Véhicule introuvable.' });
     }
 
@@ -219,7 +221,7 @@ router.get('/vehicles/:id', attachUserIfAuthenticated, async (req, res) => {
 
     // Offre déjà déposée par l'acheteur connecté sur ce véhicule dans cette session :
     // la fiche propose alors de la modifier, jamais d'en déposer une seconde.
-    const myOffer = ['acheteur', 'vendeur'].includes(req.user?.role)
+    const myOffer = session && ['acheteur', 'vendeur'].includes(req.user?.role)
       ? await Offer.findOne({
           vehicle: dossier._id,
           session: session._id,
@@ -255,7 +257,7 @@ router.get('/vehicles/:id', attachUserIfAuthenticated, async (req, res) => {
         description: dossier.description || '',
         conditionDetails: dossier.conditionDetails || '',
         listingCount: dossier.listingCount ?? 0,
-        lotNumber: dossier.lotNumber ?? null,
+        lotNumber: session ? (dossier.lotNumber ?? null) : null,
         photos,
         myOffer: myOffer
           ? {
@@ -265,13 +267,17 @@ router.get('/vehicles/:id', attachUserIfAuthenticated, async (req, res) => {
               createdAt: myOffer.createdAt,
             }
           : null,
-        session: {
-          id: String(session._id),
-          name: session.name,
-          startDate: session.startDate,
-          endDate: session.endDate,
-          status: session.status,
-        },
+        session: session
+          ? {
+              id: String(session._id),
+              name: session.name,
+              startDate: session.startDate,
+              endDate: session.endDate,
+              status: session.status,
+            }
+          : null,
+        // Faux pour un véhicule de la vitrine qui n'est dans aucune session ouverte
+        biddable: Boolean(session),
       },
     });
   } catch (error) {

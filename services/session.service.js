@@ -402,7 +402,93 @@ const withResolvedCommission = async (sessions) => {
   return Array.isArray(sessions) ? resolved : resolved[0];
 };
 
+/**
+ * Résultat de la clôture d'une session, véhicule par véhicule. Une vente est créée pour chaque
+ * véhicule à la clôture, vendu ou non : c'est elle qui permet de retrouver les invendus, que la
+ * session ne liste plus puisqu'ils sont revenus en attente.
+ *
+ * `canRelist` : le véhicule est revenu en attente de session (aucune offre ou délai de décision
+ * du vendeur dépassé) — l'admin peut le remettre en session. Un véhicule en « décision vendeur »
+ * reste rattaché à la session et appartient au vendeur jusqu'à sa décision.
+ */
+const getClosureResults = async (session) => {
+  const Sale = require('../models/sale.model');
+  const Offer = require('../models/offer.model');
+  const VehicleDossier = require('../models/vehicleDossier.model');
+
+  const sales = await Sale.find({ session: session._id })
+    .select('vehicle status amount winner sellerDecisionDueAt currentStep')
+    .populate('winner', 'companyName firstName lastName')
+    .sort({ createdAt: 1 })
+    .lean();
+  if (sales.length === 0) return [];
+
+  const vehicleIds = sales.map((sale) => sale.vehicle);
+  const [vehicles, offers] = await Promise.all([
+    VehicleDossier.find({ _id: { $in: vehicleIds } })
+      .select('brand model registrationNumber lotNumber photos reservePrice listingCount session status')
+      .lean(),
+    Offer.find({ session: session._id, vehicle: { $in: vehicleIds }, status: 'active' })
+      .populate('buyer', 'companyName firstName lastName')
+      .sort({ amount: -1, updatedAt: 1 })
+      .select('vehicle buyer amount')
+      .lean(),
+  ]);
+  const vehiclesById = new Map(vehicles.map((vehicle) => [String(vehicle._id), vehicle]));
+  const offersByVehicle = new Map();
+  for (const offer of offers) {
+    const key = String(offer.vehicle);
+    offersByVehicle.set(key, [...(offersByVehicle.get(key) || []), offer]);
+  }
+
+  const otherSessionIds = vehicles
+    .map((vehicle) => vehicle.session)
+    .filter((id) => id && String(id) !== String(session._id));
+  const otherSessions = otherSessionIds.length
+    ? await Session.find({ _id: { $in: otherSessionIds } }).select('name').lean()
+    : [];
+  const otherSessionNames = new Map(otherSessions.map((other) => [String(other._id), other.name]));
+
+  const name = (user) => user?.companyName || [user?.firstName, user?.lastName].filter(Boolean).join(' ') || '—';
+
+  return sales.map((sale) => {
+    const vehicle = vehiclesById.get(String(sale.vehicle));
+    const vehicleOffers = offersByVehicle.get(String(sale.vehicle)) || [];
+    const photos = vehicle?.photos || [];
+    const cover = photos.find((photo) => photo.isCover) || photos[0];
+
+    let vehicleState = 'en_attente';
+    if (vehicle?.session) {
+      vehicleState = String(vehicle.session) === String(session._id) ? 'dans_cette_session' : 'remis_en_session';
+    }
+
+    return {
+      saleId: String(sale._id),
+      status: sale.status,
+      amount: sale.amount ?? null,
+      winnerName: sale.winner ? name(sale.winner) : null,
+      sellerDecisionDueAt: sale.sellerDecisionDueAt || null,
+      vehicleState,
+      otherSessionName: vehicleState === 'remis_en_session' ? (otherSessionNames.get(String(vehicle.session)) || null) : null,
+      canRelist: sale.status === 'sans_gagnant' && vehicleState === 'en_attente' && vehicle?.status === 'valide',
+      offerCount: vehicleOffers.length,
+      topOffers: vehicleOffers.slice(0, 3).map((offer) => ({ amount: offer.amount, buyerName: name(offer.buyer) })),
+      vehicle: vehicle ? {
+        _id: String(vehicle._id),
+        brand: vehicle.brand || '',
+        model: vehicle.model || '',
+        registrationNumber: vehicle.registrationNumber || '',
+        lotNumber: vehicle.lotNumber ?? null,
+        reservePrice: vehicle.reservePrice ?? null,
+        listingCount: vehicle.listingCount ?? 0,
+        photoUrl: cover?.processedUrl || cover?.originalUrl || null,
+      } : null,
+    };
+  });
+};
+
 module.exports = {
+  getClosureResults,
   getConfig,
   updateConfig,
   syncSessionStatuses,

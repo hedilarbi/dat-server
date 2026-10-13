@@ -117,15 +117,22 @@ const markAllSellerNotificationsAsRead = async (sellerId) => {
   return { message: 'Notifications marquées comme lues.' };
 };
 
-const createAdminRegistrationNotification = async (user) => {
+/**
+ * Notifie l'admin qu'un compte attend sa décision. `profileModified` : il ne s'agit pas d'une
+ * inscription mais d'un compte déjà validé dont le titulaire a modifié le profil. Même type de
+ * notification dans les deux cas, pour qu'elle ouvre la fiche d'inscription du compte.
+ */
+const createAdminRegistrationNotification = async (user, { profileModified = false } = {}) => {
   const roleLabel = user.role === 'vendeur' ? 'vendeur' : 'acheteur';
 
   return Notification.create({
     recipientRole: 'admin',
     type: 'registration_submitted',
     category: 'inscription',
-    title: `Nouvelle inscription ${roleLabel}`,
-    message: `${user.companyName} a soumis un dossier ${roleLabel} à valider.`,
+    title: profileModified ? `Profil ${roleLabel} modifié à revalider` : `Nouvelle inscription ${roleLabel}`,
+    message: profileModified
+      ? `${user.companyName} a modifié son profil : son compte est en attente de votre validation.`
+      : `${user.companyName} a soumis un dossier ${roleLabel} à valider.`,
     createdByUser: user._id,
     metadata: {
       userId: user._id.toString(),

@@ -30,6 +30,21 @@ const protect = async (req, res, next) => {
       return res.status(403).json({ error: 'auth.account_blocked', message: 'Votre compte est bloqué.' });
     }
 
+    // Compte validé dont les modifications de profil attendent la décision de l'admin : il peut
+    // poursuivre ses ventes en cours (routes /sales, notifications, support, auth), mais aucune
+    // nouvelle action — offre, création ou modification de véhicule… — n'est autorisée.
+    if (user.status === 'soumis' && user.profileChangePending) {
+      const fullPath = (req.baseUrl || '') + (req.path || '');
+      const allowed = fullPath.includes('/auth/')
+        || fullPath.includes('/tickets') || fullPath.includes('/support')
+        || fullPath.includes('/sales')
+        || fullPath.includes('/notifications')
+        || (fullPath.includes('/vehicle-dossiers') && req.method === 'GET');
+      if (!allowed) {
+        return res.status(403).json({ error: 'auth.profile_review_pending', message: 'Vos modifications de profil sont en attente de validation : vous pouvez terminer vos ventes en cours, mais aucune nouvelle action n\'est possible pour le moment.' });
+      }
+    }
+
     // Un compte suspendu a un accès restreint :
     // - auth/me + logout + règlement commission impayée + support : toujours autorisés
     // - routes /sales : autorisées pour poursuivre les ventes conservées dès l'étape 2

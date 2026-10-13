@@ -364,6 +364,7 @@ const registerStep2 = async (userId, profileData) => {
   user.cinRectoUrl = cinRectoUrl;
   user.cinVersoUrl = cinVersoUrl;
   user.status = 'soumis'; // Passe à soumis pour validation par l'admin
+  user.profileChangePending = false; // c'est une (re)soumission d'inscription, pas une modification de profil
 
   await user.save();
   await createAdminRegistrationNotification(user);
@@ -381,6 +382,16 @@ const registerStep2 = async (userId, profileData) => {
  * comptes déjà instruits : un compte encore en brouillon ou en correction utilise
  * registerStep2, qui les fait ressoumettre pour validation.
  */
+/** Prévient l'admin qu'un compte validé repasse en attente après une modification de profil. */
+const notifyAdminProfileModified = async (user) => {
+  try {
+    await createAdminRegistrationNotification(user, { profileModified: true });
+  } catch (error) {
+    // La modification est déjà enregistrée : un échec de notification ne doit pas l'annuler
+    console.error(`Notification admin de modification de profil impossible (${user.email}) : ${error.message}`);
+  }
+};
+
 const updateProfile = async (userId, profileData) => {
   const user = await User.findById(userId);
   if (!user) {
@@ -501,11 +512,16 @@ const updateProfile = async (userId, profileData) => {
 
   // Toute modification du profil d'un compte validé le remet en attente de confirmation par
   // l'administration. Un compte suspendu reste suspendu : modifier son profil ne le réactive pas.
-  if (user.status === 'valide' && snapshot() !== before) {
-    user.status = 'en_attente_validation';
+  // Statut « soumis » : c'est celui que l'administration traite (compteur, filtre « en attente »,
+  // boutons Valider / Refuser) ; « en_attente_validation » n'y est pas reconnu.
+  const profileChanged = user.status === 'valide' && snapshot() !== before;
+  if (profileChanged) {
+    user.status = 'soumis';
+    user.profileChangePending = true;
   }
 
   await user.save();
+  if (profileChanged) await notifyAdminProfileModified(user);
 
   const userObj = user.toObject();
   delete userObj.password;
@@ -681,11 +697,14 @@ const updateStamp = async (userId, stampUrl) => {
   // Remplacer un tampon existant est une modification du profil : le compte repasse en attente
   // de confirmation. Le poser pour la première fois n'en est pas une — il est exigé pour établir
   // les documents d'une vente en cours, qui ne doit pas être bloquée pour autant.
-  if (user.status === 'valide' && user.stampUrl && normalized && normalized !== user.stampUrl) {
-    user.status = 'en_attente_validation';
+  const stampReplaced = user.status === 'valide' && user.stampUrl && normalized && normalized !== user.stampUrl;
+  if (stampReplaced) {
+    user.status = 'soumis';
+    user.profileChangePending = true;
   }
   user.stampUrl = normalized;
   await user.save();
+  if (stampReplaced) await notifyAdminProfileModified(user);
 
   // Étape 3.2 : les documents des ventes qui n'attendaient plus que ce tampon sont générés.
   // Chargé à l'appel : sale.service charge lui-même des services qui dépendent de celui-ci.

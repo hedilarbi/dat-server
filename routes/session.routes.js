@@ -149,6 +149,13 @@ router.get('/:id', protect, adminOnly, async (req, res) => {
       };
     });
     session.vehicleCount = vehicles.length;
+
+    // Session clôturée : résultat de chaque véhicule, y compris ceux qui n'ont plus de lien avec elle
+    // (invendus retournés en attente). Sans cela, l'admin ne voit que les véhicules vendus.
+    if (['closed', 'cloturee'].includes(session.status)) {
+      session.closureResults = await sessionService.getClosureResults(session);
+    }
+
     res.json(await sessionService.withResolvedCommission(session));
   } catch (error) {
     console.error('Erreur GET /sessions/:id:', error);

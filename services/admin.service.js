@@ -152,6 +152,7 @@ const approveUser = async (userId) => {
   }
 
   user.status = 'valide';
+  user.profileChangePending = false;
   await user.save();
 
   // Envoyer un e-mail de validation
@@ -223,6 +224,7 @@ const rejectUser = async (userId, { motifs, comment }) => {
 
   // Changer le statut
   user.status = 'refuse';
+  user.profileChangePending = false;
 
   // Enregistrer le rejet dans l'historique (motifsLabels = libellés résolus affichés à l'utilisateur)
   user.rejections.push({
@@ -301,6 +303,7 @@ const requestCorrection = async (userId, { motifs, comment }) => {
   const reasonsPlain = reasonMessages.join(', ');
 
   user.status = 'correction_demandee';
+  user.profileChangePending = false;
   user.rejections.push({
     date: new Date(),
     motifs,
