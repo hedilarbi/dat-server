@@ -418,7 +418,7 @@ const getClosureResults = async (session) => {
 
   const sales = await Sale.find({ session: session._id })
     .select('vehicle status amount winner sellerDecisionDueAt currentStep')
-    .populate('winner', 'companyName firstName lastName')
+    .populate('winner', 'companyName firstName lastName role')
     .sort({ createdAt: 1 })
     .lean();
   if (sales.length === 0) return [];
@@ -467,6 +467,9 @@ const getClosureResults = async (session) => {
       status: sale.status,
       amount: sale.amount ?? null,
       winnerName: sale.winner ? name(sale.winner) : null,
+      // Pour ouvrir la fiche d'inscription de l'acheteur depuis le résultat de la clôture
+      winnerId: sale.winner ? String(sale.winner._id) : null,
+      winnerRole: sale.winner?.role || 'acheteur',
       sellerDecisionDueAt: sale.sellerDecisionDueAt || null,
       vehicleState,
       otherSessionName: vehicleState === 'remis_en_session' ? (otherSessionNames.get(String(vehicle.session)) || null) : null,
