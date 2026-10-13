@@ -60,6 +60,14 @@ connectDB().then(() => {
     console.error('Erreur initialisation des sessions:', err.message);
   });
 
+  // Jeton de signature électronique : renouvelé avant son expiration (toutes les 30 minutes)
+  const { ensureFreshToken } = require('./services/esignatureToken.service');
+  const refreshSignatureToken = () => ensureFreshToken().catch((err) => {
+    console.error('Renouvellement du jeton de signature:', err.message);
+  });
+  refreshSignatureToken();
+  setInterval(refreshSignatureToken, 30 * 60 * 1000);
+
   // Tâche de fond automatique toutes les 60 secondes
   setInterval(() => {
     syncSessionsAndAttributions().catch((err) => {

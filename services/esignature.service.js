@@ -1,6 +1,7 @@
 const axios = require('axios');
 const fs = require('fs');
 const { getSignedUrl } = require('./storage.service');
+const { authorizedRequest } = require('./esignatureToken.service');
 
 // Même repli que les e-mails (emailTemplates.service.js) : le retour depuis la plateforme de
 // signature doit désigner le même site que les liens envoyés par courriel.
@@ -55,11 +56,6 @@ const signaturesFor = (role, declarationFirstPage) => [
  * `declarationFirstPage` : page (à partir de 1) où commence la déclaration dans le dossier.
  */
 const createSignatureSession = async ({ saleId, seller, buyer, bundleBuffer, declarationFirstPage }) => {
-  const token = process.env.ESIGNATURE_TOKEN;
-  if (!token) {
-    throw new Error('ESIGNATURE_TOKEN manquant dans les variables d\'environnement');
-  }
-
   const esignatureBaseUrl = requiredUrl('ESIGNATURE_BASE_URL');
   const baseUrl = requiredUrl('APP_BASE_URL');
   const webhookSecret = process.env.ESIGNATURE_WEBHOOK_SECRET?.trim();
@@ -116,12 +112,13 @@ const createSignatureSession = async ({ saleId, seller, buyer, bundleBuffer, dec
   };
 
   try {
-    const response = await axios.post(`${esignatureBaseUrl}/EU-SES`, payload, {
+    // Jeton géré par esignatureToken.service : renouvelé automatiquement s'il a expiré
+    const response = await authorizedRequest({
+      method: 'post',
+      url: `${esignatureBaseUrl}/EU-SES`,
+      data: payload,
       timeout: REQUEST_TIMEOUT_MS,
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json'
-      }
+      headers: { 'Content-Type': 'application/json' },
     });
 
     if (response.data && response.data.success === false) {
@@ -154,18 +151,12 @@ module.exports = {
  * Récupère le document signé final depuis OpenAPI
  */
 const fetchSignedDocument = async (signatureId) => {
-  const token = process.env.ESIGNATURE_TOKEN;
-  if (!token) {
-    throw new Error('ESIGNATURE_TOKEN manquant dans les variables d\'environnement');
-  }
-
   const esignatureBaseUrl = requiredUrl('ESIGNATURE_BASE_URL');
   try {
-    const response = await axios.get(`${esignatureBaseUrl}/signatures/${signatureId}/signedDocument`, {
+    const response = await authorizedRequest({
+      method: 'get',
+      url: `${esignatureBaseUrl}/signatures/${signatureId}/signedDocument`,
       timeout: REQUEST_TIMEOUT_MS,
-      headers: {
-        'Authorization': `Bearer ${token}`
-      },
       responseType: 'arraybuffer' // car c'est un fichier binaire
     });
 
@@ -177,13 +168,12 @@ const fetchSignedDocument = async (signatureId) => {
 };
 
 const fetchAuditTrail = async (signatureId) => {
-  const token = process.env.ESIGNATURE_TOKEN;
-  if (!token) throw new Error('ESIGNATURE_TOKEN manquant dans les variables d\'environnement');
-
   const esignatureBaseUrl = requiredUrl('ESIGNATURE_BASE_URL');
-  const response = await axios.get(`${esignatureBaseUrl}/signatures/${signatureId}/audit`, {
+  const response = await authorizedRequest({
+    method: 'get',
+    url: `${esignatureBaseUrl}/signatures/${signatureId}/audit`,
     timeout: REQUEST_TIMEOUT_MS,
-    headers: { Authorization: `Bearer ${token}`, Accept: 'application/pdf' },
+    headers: { Accept: 'application/pdf' },
     responseType: 'arraybuffer',
   });
   return Buffer.from(response.data);
@@ -196,13 +186,12 @@ const fetchAuditTrail = async (signatureId) => {
  * le webhook n'est jamais arrivé.
  */
 const fetchSignatureProgress = async (signatureId) => {
-  const token = process.env.ESIGNATURE_TOKEN;
-  if (!token) throw new Error('ESIGNATURE_TOKEN manquant dans les variables d\'environnement');
-
   const esignatureBaseUrl = requiredUrl('ESIGNATURE_BASE_URL');
-  const response = await axios.get(`${esignatureBaseUrl}/signatures/${signatureId}/detail`, {
+  const response = await authorizedRequest({
+    method: 'get',
+    url: `${esignatureBaseUrl}/signatures/${signatureId}/detail`,
     timeout: REQUEST_TIMEOUT_MS,
-    headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+    headers: { Accept: 'application/json' },
   });
   // Selon les endpoints, l'API renvoie l'objet directement ou l'enveloppe dans { data }.
   const detail = response.data?.data ?? response.data;

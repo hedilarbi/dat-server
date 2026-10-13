@@ -185,7 +185,7 @@ router.get('/vehicles/:id', attachUserIfAuthenticated, async (req, res) => {
         'firstRegistrationDate', 'vehicleGenre', 'fiscalPower', 'bodyType', 'gearbox',
         'passengerCount', 'doorCount', 'color', 'vrade', 'procedure', 'registrationCardAvailable',
         'identificationSheetAvailable', 'description', 'conditionDetails', 'listingCount',
-        'photos', 'session', 'lotNumber', 'seller', 'showcaseOrder',
+        'photos', 'session', 'lotNumber', 'seller', 'showcaseOrder', 'expertReport',
       ].join(' '))
       .lean();
 
@@ -274,6 +274,13 @@ router.get('/vehicles/:id', attachUserIfAuthenticated, async (req, res) => {
               startDate: session.startDate,
               endDate: session.endDate,
               status: session.status,
+            }
+          : null,
+        // Rapport d'expert (version floutée de préférence) : réservé aux utilisateurs connectés
+        expertReport: req.user && (dossier.expertReport?.processedUrl || dossier.expertReport?.originalUrl)
+          ? {
+              url: dossier.expertReport.processedUrl || dossier.expertReport.originalUrl,
+              mimeType: dossier.expertReport.mimeType || null,
             }
           : null,
         // Faux pour un véhicule de la vitrine qui n'est dans aucune session ouverte
