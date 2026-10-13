@@ -382,6 +382,26 @@ const registerStep2 = async (userId, profileData) => {
  * comptes déjà instruits : un compte encore en brouillon ou en correction utilise
  * registerStep2, qui les fait ressoumettre pour validation.
  */
+/**
+ * Annule (statut « annulée », l'historique est conservé) les offres en cours d'un compte qui fait
+ * une demande de modification : le titulaire en a été prévenu avant de valider, et ne peut plus en
+ * déposer ni en modifier tant que l'admin n'a pas tranché. Ses ventes déjà attribuées ne sont pas touchées.
+ */
+const cancelLiveOffersOf = async (userId) => {
+  try {
+    const Offer = require('../models/offer.model');
+    const Session = require('../models/session.model');
+    const liveSessionIds = await Session.find({ status: { $in: ['open', 'active'] } }).distinct('_id');
+    if (liveSessionIds.length === 0) return;
+    await Offer.updateMany(
+      { buyer: userId, status: 'active', session: { $in: liveSessionIds } },
+      { $set: { status: 'annulee', cancelledAt: new Date() } },
+    );
+  } catch (error) {
+    console.error(`Annulation des offres en cours impossible (utilisateur ${userId}) : ${error.message}`);
+  }
+};
+
 /** Prévient l'admin qu'un compte validé repasse en attente après une modification de profil. */
 const notifyAdminProfileModified = async (user) => {
   try {
@@ -521,7 +541,10 @@ const updateProfile = async (userId, profileData) => {
   }
 
   await user.save();
-  if (profileChanged) await notifyAdminProfileModified(user);
+  if (profileChanged) {
+    await cancelLiveOffersOf(user._id);
+    await notifyAdminProfileModified(user);
+  }
 
   const userObj = user.toObject();
   delete userObj.password;
@@ -704,7 +727,10 @@ const updateStamp = async (userId, stampUrl) => {
   }
   user.stampUrl = normalized;
   await user.save();
-  if (stampReplaced) await notifyAdminProfileModified(user);
+  if (stampReplaced) {
+    await cancelLiveOffersOf(user._id);
+    await notifyAdminProfileModified(user);
+  }
 
   // Étape 3.2 : les documents des ventes qui n'attendaient plus que ce tampon sont générés.
   // Chargé à l'appel : sale.service charge lui-même des services qui dépendent de celui-ci.

@@ -39,7 +39,9 @@ const protect = async (req, res, next) => {
         || fullPath.includes('/tickets') || fullPath.includes('/support')
         || fullPath.includes('/sales')
         || fullPath.includes('/notifications')
-        || (fullPath.includes('/vehicle-dossiers') && req.method === 'GET');
+        || (fullPath.includes('/vehicle-dossiers') && req.method === 'GET')
+        // Consulter ses propres offres en cours reste possible ; en déposer, modifier ou annuler non
+        || (fullPath.includes('/offers/mine') && req.method === 'GET');
       if (!allowed) {
         return res.status(403).json({ error: 'auth.profile_review_pending', message: 'Vos modifications de profil sont en attente de validation : vous pouvez terminer vos ventes en cours, mais aucune nouvelle action n\'est possible pour le moment.' });
       }
