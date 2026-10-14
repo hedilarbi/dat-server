@@ -6,7 +6,7 @@ const Session = require('../models/session.model');
 const Sale = require('../models/sale.model');
 const { sendEmail } = require('../config/mail');
 const { normalizeLanguage, approvalEmail, profileChangeApprovedEmail, profileChangeRejectedEmail, rejectionEmail, correctionEmail } = require('./emailTemplates.service');
-const { applyProfileChanges } = require('../utils/profileChanges');
+const { applyProfileChanges, snapshotProfile } = require('../utils/profileChanges');
 const notificationService = require('./notification.service');
 
 // expo-server-sdk v6 ships as an ES Module ("type": "module"); require()-ing it crashes on
@@ -176,11 +176,23 @@ const discardProfileChange = async (user, { motifs, comment }) => {
   const reasonsText = reasonMessages.map((text) => `- ${text}`).join('<br>');
   const reasonsPlain = reasonMessages.join(', ');
 
+  const historyEntry = {
+    requestedAt: user.pendingProfile?.submittedAt,
+    decidedAt: new Date(),
+    decision: 'refuse',
+    // Le profil en vigueur n'a pas changé : une seule copie, plus ce qui était demandé
+    before: snapshotProfile(user),
+    requestedChanges: user.pendingProfile?.changes,
+    reasons: reasonMessages,
+    comment: comment || '',
+  };
+
   user.status = 'valide';
   user.hasBeenValidated = true;
   user.profileChangePending = false;
   user.pendingProfile = undefined;
   await user.save();
+  await User.updateOne({ _id: user._id }, { $push: { profileHistory: historyEntry } });
 
   try {
     await sendEmail({ to: user.email, ...profileChangeRejectedEmail({ user, reasonsText, reasonsPlain, comment }) });
@@ -197,6 +209,33 @@ const discardProfileChange = async (user, { motifs, comment }) => {
   return userObj;
 };
 
+/** Note interne et historique des modifications de profil d'un compte (réservés à l'admin). */
+const getUserAdminData = async (userId) => {
+  const user = await User.findById(userId).select('+adminNote +profileHistory').lean();
+  if (!user) {
+    const err = new Error('Utilisateur introuvable.');
+    err.codeName = 'admin.user_not_found';
+    err.statusCode = 404;
+    throw err;
+  }
+  return {
+    adminNote: user.adminNote || { text: '', updatedAt: null },
+    profileHistory: [...(user.profileHistory || [])].sort((a, b) => new Date(b.decidedAt) - new Date(a.decidedAt)),
+  };
+};
+
+const updateUserAdminNote = async (userId, text) => {
+  const clean = String(text ?? '').slice(0, 5000);
+  const result = await User.updateOne({ _id: userId }, { $set: { adminNote: { text: clean, updatedAt: new Date() } } });
+  if (result.matchedCount === 0) {
+    const err = new Error('Utilisateur introuvable.');
+    err.codeName = 'admin.user_not_found';
+    err.statusCode = 404;
+    throw err;
+  }
+  return { text: clean, updatedAt: new Date() };
+};
+
 /**
  * Valider l'inscription d'un utilisateur (acheteur ou vendeur)
  */
@@ -211,9 +250,20 @@ const approveUser = async (userId) => {
   // Demande de modification : les modifications mises de côté s'intègrent au profil à l'approbation
   const wasProfileChange = Boolean(user.profileChangePending);
   const pendingChanges = user.pendingProfile?.changes;
+  let historyEntry = null;
   if (wasProfileChange && pendingChanges && Object.keys(pendingChanges).length > 0) {
     await assertProfileChangesAvailable(user, pendingChanges);
+    // Copie du profil AVANT, puis APRÈS validation : conservées pour toujours
+    const before = snapshotProfile(user);
     applyProfileChanges(user, pendingChanges);
+    historyEntry = {
+      requestedAt: user.pendingProfile?.submittedAt,
+      decidedAt: new Date(),
+      decision: 'valide',
+      before,
+      after: snapshotProfile(user),
+      requestedChanges: pendingChanges,
+    };
   }
   user.pendingProfile = undefined;
 
@@ -221,6 +271,7 @@ const approveUser = async (userId) => {
   user.hasBeenValidated = true;
   user.profileChangePending = false;
   await user.save();
+  if (historyEntry) await User.updateOne({ _id: user._id }, { $push: { profileHistory: historyEntry } });
 
   // Envoyer un e-mail de validation
   try {
@@ -760,6 +811,8 @@ const getUserSuspensionHistory = async (userId) => {
 };
 
 module.exports = {
+  getUserAdminData,
+  updateUserAdminNote,
   getUsers,
   approveUser,
   rejectUser,

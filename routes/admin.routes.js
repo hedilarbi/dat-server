@@ -13,6 +13,9 @@ router.post('/users/:id/reject', adminController.rejectUser);
 router.post('/users/:id/request-correction', adminController.requestCorrection);
 router.put('/users/:id/status', adminController.updateStatus);
 router.get('/users/:id/suspension-history', adminController.getUserSuspensionHistory);
+// Note interne et historique des modifications de profil : visibles et modifiables par l'admin seul
+router.get('/users/:id/admin-data', adminController.getUserAdminData);
+router.put('/users/:id/note', adminController.updateUserAdminNote);
 
 router.get('/dashboard-stats', adminController.getDashboardStats);
 router.get('/payments', adminController.getPayments);

@@ -108,6 +108,30 @@ const userSchema = new mongoose.Schema({
     changes: { type: mongoose.Schema.Types.Mixed, default: undefined },
     submittedAt: { type: Date },
   },
+  // Réservés à l'administration : exclus de toute lecture ordinaire (`select: false`), donc jamais
+  // renvoyés au titulaire du compte ; l'admin les demande explicitement.
+  // Note interne sur le compte
+  adminNote: {
+    type: { text: { type: String, default: '' }, updatedAt: { type: Date } },
+    select: false,
+    default: undefined,
+  },
+  // Historique des demandes de modification traitées : copie du profil AVANT et APRÈS chaque
+  // validation (ou, pour un refus, profil conservé et modifications demandées).
+  profileHistory: {
+    type: [{
+      requestedAt: { type: Date },
+      decidedAt: { type: Date, default: Date.now },
+      decision: { type: String, enum: ['valide', 'refuse'], required: true },
+      before: { type: mongoose.Schema.Types.Mixed },
+      after: { type: mongoose.Schema.Types.Mixed },
+      requestedChanges: { type: mongoose.Schema.Types.Mixed },
+      reasons: [{ type: String }],
+      comment: { type: String },
+    }],
+    select: false,
+    default: undefined,
+  },
   // Email verification & OTP
   emailVerified: {
     type: Boolean,

@@ -68,6 +68,23 @@ const getUserSuspensionHistory = async (req, res, next) => {
   }
 };
 
+const getUserAdminData = async (req, res, next) => {
+  try {
+    res.status(200).json({ success: true, ...(await adminService.getUserAdminData(req.params.id)) });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const updateUserAdminNote = async (req, res, next) => {
+  try {
+    const adminNote = await adminService.updateUserAdminNote(req.params.id, req.body?.text);
+    res.status(200).json({ success: true, adminNote });
+  } catch (error) {
+    next(error);
+  }
+};
+
 const getNotifications = async (req, res, next) => {
   try {
     const result = await notificationService.getAdminNotifications();
@@ -223,6 +240,8 @@ module.exports = {
   requestCorrection,
   updateStatus,
   getUserSuspensionHistory,
+  getUserAdminData,
+  updateUserAdminNote,
   getNotifications,
   markNotificationAsRead,
   markAllNotificationsAsRead,

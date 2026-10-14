@@ -36,6 +36,26 @@ const buildProfileChanges = (user, proposed) => {
   return changes;
 };
 
+/**
+ * Copie complète des informations de profil modifiables, à un instant donné. Conservée pour chaque
+ * demande de modification traitée : le profil d'avant et celui d'après restent consultables.
+ */
+const snapshotProfile = (user) => ({
+  firstName: clean(user.firstName),
+  lastName: clean(user.lastName),
+  companyName: clean(user.companyName),
+  activityType: clean(user.activityType),
+  phone: clean(user.phone),
+  siret: clean(user.siret),
+  vhuNumber: clean(user.vhuNumber),
+  address: Object.fromEntries(ADDRESS_FIELDS.map((key) => [key, clean(plain(user.address)[key])])),
+  bankInfo: Object.fromEntries(BANK_FIELDS.map((key) => [key, clean(plain(user.bankInfo)[key])])),
+  kbisUrl: clean(user.kbisUrl),
+  cinRectoUrl: clean(user.cinRectoUrl),
+  cinVersoUrl: clean(user.cinVersoUrl),
+  stampUrl: clean(user.stampUrl),
+});
+
 /** Intègre les modifications au compte (sans l'enregistrer). */
 const applyProfileChanges = (user, changes) => {
   for (const field of SIMPLE_FIELDS) {
@@ -63,4 +83,4 @@ const describeProfileChanges = (user, changes) => {
   return rows;
 };
 
-module.exports = { buildProfileChanges, applyProfileChanges, describeProfileChanges };
+module.exports = { buildProfileChanges, applyProfileChanges, describeProfileChanges, snapshotProfile };

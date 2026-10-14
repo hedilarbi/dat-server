@@ -1168,7 +1168,7 @@ const saleClosureSummarySellerEmail = ({ user, sessionName, awarded = [], belowR
   }[lang];
 
   const th = (label) => `<th align="left" style="padding:10px;color:#4C5058;font-size:11px;text-transform:uppercase;">${label}</th>`;
-  const section = ({ title, note, color, items, cta, url, withOffers = true, perItemLink = false }) => {
+  const section = ({ title, note, color, items, cta, url, withOffers = true, offerColor = '#D9704F' }) => {
     if (!items.length) return { html: '', text: '' };
     const vehicleName = (item) => `${item.vehicleLabel}${item.registrationNumber ? ` · ${item.registrationNumber}` : ''}`;
     const rows = items.map((item) => `
@@ -1176,16 +1176,15 @@ const saleClosureSummarySellerEmail = ({ user, sessionName, awarded = [], belowR
         <td style="padding:10px;border-bottom:1px solid #ECEADF;width:72px;">${item.photoUrl ? `<img src="${item.photoUrl}" alt="" width="72" height="54" style="display:block;width:72px;height:54px;object-fit:cover;border-radius:6px;" />` : ''}</td>
         <td style="padding:10px;border-bottom:1px solid #ECEADF;color:#13243C;font-weight:bold;">${vehicleName(item)}</td>
         <td style="padding:10px;border-bottom:1px solid #ECEADF;color:#5A5E66;">${formatAmount(item.reservePrice)}</td>
-        ${withOffers ? `<td style="padding:10px;border-bottom:1px solid #ECEADF;color:#D9704F;font-weight:bold;">${item.bestOffer != null ? formatAmount(item.bestOffer) : '—'}</td>
+        ${withOffers ? `<td style="padding:10px;border-bottom:1px solid #ECEADF;color:${offerColor};font-weight:bold;">${item.bestOffer != null ? formatAmount(item.bestOffer) : '—'}</td>
         <td style="padding:10px;border-bottom:1px solid #ECEADF;color:#5A5E66;">${item.offerCount ?? 0}</td>` : ''}
-        ${perItemLink ? `<td style="padding:10px;border-bottom:1px solid #ECEADF;" align="right"><a href="${salesUrl}/${item.saleId}" style="color:#13243C;font-weight:bold;">${cta} →</a></td>` : ''}
       </tr>`).join('');
     return {
       html: `
         <h3 style="color:${color};font-size:15px;margin:26px 0 6px;">${title} (${items.length})</h3>
         <table style="width:100%;border-collapse:collapse;background:#FFFFFF;border:1px solid #ECEADF;border-radius:8px;overflow:hidden;margin:10px 0;">
           <thead><tr style="background:#F8F7F2;">
-            <th></th>${th(copy.vehicle)}${th(copy.reserve)}${withOffers ? th(copy.best) + th(copy.offers) : ''}${perItemLink ? '<th></th>' : ''}
+            <th></th>${th(copy.vehicle)}${th(copy.reserve)}${withOffers ? th(copy.best) + th(copy.offers) : ''}
           </tr></thead>
           <tbody>${rows}</tbody>
         </table>
@@ -1198,8 +1197,9 @@ const saleClosureSummarySellerEmail = ({ user, sessionName, awarded = [], belowR
   };
 
   const sections = [
-    section({ title: copy.awardedTitle, note: copy.awardedNote, color: '#1F7A4D', items: awarded, cta: copy.awardedCta, url: salesUrl }),
-    section({ title: copy.belowTitle, note: copy.belowNote, color: '#B04A2C', items: belowReserve, cta: copy.belowCta, url: salesUrl, perItemLink: true }),
+    section({ title: copy.awardedTitle, note: copy.awardedNote, color: '#1F7A4D', items: awarded, cta: copy.awardedCta, url: salesUrl, offerColor: '#1F7A4D' }),
+    // Les véhicules à décider sont dans « En vente » (état « décision requise »), pas dans « Mes ventes »
+    section({ title: copy.belowTitle, note: copy.belowNote, color: '#B04A2C', items: belowReserve, cta: copy.belowCta, url: `${vehiclesUrl}?etat=offres_a_decider` }),
     section({ title: copy.noneTitle, note: copy.noneNote, color: '#5A5E66', items: noOffers, cta: copy.noneCta, url: vehiclesUrl, withOffers: false }),
   ];
 
