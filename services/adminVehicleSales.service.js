@@ -6,6 +6,7 @@ const Session = require('../models/session.model');
 const mongoose = require('mongoose');
 const generalConfigService = require('./generalConfig.service');
 const { buildBuyerOfferHistory } = require('../utils/offerHistory');
+const { findCriticalSales } = require('../utils/criticalSales');
 
 /**
  * Suivi commercial des véhicules validés, côté administration.
@@ -100,6 +101,12 @@ const buildDossierMatch = async (columnFilters) => {
     const start = new Date(`${columnFilters.submittedAt}T00:00:00.000Z`);
     const end = new Date(`${columnFilters.submittedAt}T23:59:59.999Z`);
     if (!Number.isNaN(start.getTime())) match.submittedAt = { $gte: start, $lte: end };
+  }
+
+  // Carte « Véhicules invendus » : tentatives de mise en vente épuisées (même seuil que le tableau de bord)
+  if (columnFilters.maxedOut === 'true') {
+    const config = await generalConfigService.getConfig();
+    match.listingCount = { $gte: Number(config?.vehicleListingAttempts) || 3 };
   }
 
   if (columnFilters.seller) {
@@ -369,6 +376,11 @@ const adminListSales = async (filters = {}) => {
   if (columnFilters.winner) match.winner = { $in: await findUserIdsByName(columnFilters.winner) };
   if (columnFilters.session) {
     match.session = { $in: await Session.find({ name: new RegExp(escapeRegExp(columnFilters.session), 'i') }).distinct('_id') };
+  }
+  // Carte « Ventes critiques » du tableau de bord : étape 1 ou 2 au-delà de 80 % du délai
+  if (columnFilters.critical === 'true') {
+    const critical = await findCriticalSales(Sale);
+    match._id = { $in: critical.map((sale) => sale._id) };
   }
   if (columnFilters.currentStep && Number.isFinite(Number(columnFilters.currentStep))) {
     match.currentStep = Number(columnFilters.currentStep);

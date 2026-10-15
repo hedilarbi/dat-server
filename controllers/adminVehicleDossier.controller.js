@@ -15,15 +15,6 @@ const updateShowcase = async (req, res, next) => {
   } catch (error) { next(error); }
 };
 
-const listMaxedOutVehicles = async (req, res, next) => {
-  try {
-    const result = await adminVehicleSalesService.adminListMaxedOutVehicles({ limit: req.query.limit });
-    res.status(200).json({ success: true, ...result });
-  } catch (error) {
-    next(error);
-  }
-};
-
 const listVehicleSales = async (req, res, next) => {
   try {
     const { state, columnFilters, page, limit } = req.query;
@@ -139,7 +130,6 @@ module.exports = {
   getAvailableDossiers,
   listVehicleSales,
   listVehicleOffers,
-  listMaxedOutVehicles,
   listShowcase,
   updateShowcase
 };

@@ -10,7 +10,6 @@ router.get('/', adminVehicleDossierController.listDossiers);
 router.get('/available', adminVehicleDossierController.getAvailableDossiers);
 // Véhicules dont le dossier est validé, avec leur situation commerciale (onglet « Véhicules »)
 router.get('/valides', adminVehicleDossierController.listVehicleSales);
-router.get('/tentatives-max', adminVehicleDossierController.listMaxedOutVehicles);
 router.get('/showcase', adminVehicleDossierController.listShowcase);
 router.put('/showcase', adminVehicleDossierController.updateShowcase);
 router.get('/:id/offers', adminVehicleDossierController.listVehicleOffers);

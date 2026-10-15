@@ -1127,7 +1127,7 @@ const saleClosureSummarySellerEmail = ({ user, sessionName, awarded = [], belowR
   const copy = {
     fr: {
       subject: `${sessionName} : récapitulatif de clôture de vos véhicules - DealAutoPro`,
-      heading: `Récapitulatif de la session ${sessionName} de vente`,
+      heading: `Récapitulatif de la session de vente ${sessionName}`,
       hello: `Bonjour ${user.firstName || ''} ${user.lastName || ''},`.replace(/\s+,/, ','),
       intro: `La session ${sessionName} est clôturée. Voici le résultat de vos véhicules.`,
       vehicle: 'Véhicule',

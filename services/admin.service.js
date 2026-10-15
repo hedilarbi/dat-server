@@ -7,6 +7,7 @@ const Sale = require('../models/sale.model');
 const { sendEmail } = require('../config/mail');
 const { normalizeLanguage, approvalEmail, profileChangeApprovedEmail, profileChangeRejectedEmail, rejectionEmail, correctionEmail } = require('./emailTemplates.service');
 const { applyProfileChanges, snapshotProfile } = require('../utils/profileChanges');
+const { findCriticalSales } = require('../utils/criticalSales');
 const notificationService = require('./notification.service');
 
 // expo-server-sdk v6 ships as an ES Module ("type": "module"); require()-ing it crashes on
@@ -561,44 +562,20 @@ const getDashboardStats = async () => {
     .sort({ createdAt: -1 })
     .limit(5)
     .select('firstName lastName companyName role email createdAt status');
-  // Ventes critiques : étape 1 ou 2 entre 80 % et 100 % du délai courant.
-  // Une échéance expirée est traitée par la réattribution et ne doit plus rester dans
-  // ce tableau. Le candidat suivant repart avec son propre chronomètre à zéro.
-  const allCurrentPayments = await Sale.find({
-    status: 'en_cours',
-    currentStep: { $in: [1, 2] },
-  })
-    .populate('vehicle', 'brand model year')
-    .populate('winner', 'firstName lastName companyName')
-    .lean();
+  // Ventes critiques (définition commune avec le filtre de la liste des ventes)
+  const latePaymentSales = (await findCriticalSales(Sale, { populate: true })).map((sale) => ({
+    ...sale,
+    winningOfferAmount: sale.amount || sale.winningOfferAmount || 0,
+  }));
 
-  const now = new Date();
-  const latePaymentSales = allCurrentPayments
-    .filter((sale) => {
-      if (!sale.currentStepDueAt) return false;
-      const dueAt = new Date(sale.currentStepDueAt);
-      const startedAt = sale.currentStepStartedAt
-        ? new Date(sale.currentStepStartedAt)
-        : sale.wonAt
-          ? new Date(sale.wonAt)
-          : sale.createdAt
-            ? new Date(sale.createdAt)
-            : null;
+  // Véhicules invendus (tentatives épuisées) et véhicules en attente de session : comptés ici, les
+  // listes correspondantes s'ouvrent déjà filtrées depuis les cartes du tableau de bord
+  const adminVehicleSales = require('./adminVehicleSales.service');
+  const [maxedOut, vehicleStates] = await Promise.all([
+    adminVehicleSales.adminListMaxedOutVehicles({ limit: 1 }),
+    adminVehicleSales.adminListVehicleSales({ page: 1, limit: 1 }),
+  ]);
 
-      if (now >= dueAt) return false;
-      if (!startedAt) return false;
-
-      const total = dueAt.getTime() - startedAt.getTime();
-      if (total <= 0) return true;
-
-      const elapsedPercent = ((now.getTime() - startedAt.getTime()) / total) * 100;
-      return elapsedPercent >= 80;
-    })
-    .map((sale) => ({
-      ...sale,
-      winningOfferAmount: sale.amount || sale.winningOfferAmount || 0,
-    }));
-    
   return {
     pendingActions: {
       users: pendingBuyersCount + pendingSellersCount,
@@ -607,6 +584,10 @@ const getDashboardStats = async () => {
       dossiers: pendingDossiersCount,
       tickets: pendingTicketsCount,
       latePayments: latePaymentSales,
+      criticalSales: latePaymentSales.length,
+      unsoldVehicles: maxedOut.total,
+      unsoldThreshold: maxedOut.threshold,
+      waitingVehicles: vehicleStates.counts?.en_attente || 0,
     },
     kpis: {
       activeSessions: activeSessionsCount,
