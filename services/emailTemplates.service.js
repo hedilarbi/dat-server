@@ -761,6 +761,36 @@ const adminLatePaymentAlertEmail = ({ vehicleLabel, buyerName, buyerEmail, saleI
   };
 };
 
+/** Prévient l'admin qu'un compte attend sa validation (nouvelle inscription ou profil modifié). */
+const adminAccountToValidateEmail = ({ user, profileModified = false }) => {
+  const adminBaseUrl = process.env.ADMIN_BASE_URL || process.env.ADMIN_URL || 'http://localhost:3002';
+  const roleLabel = user.role === 'vendeur' ? 'vendeur' : 'acheteur';
+  const url = `${adminBaseUrl}/inscription/${roleLabel}/${user._id}`;
+  const name = user.companyName || [user.firstName, user.lastName].filter(Boolean).join(' ') || user.email;
+  const title = profileModified ? `Profil ${roleLabel} modifié à revalider` : `Nouvelle inscription ${roleLabel} à valider`;
+
+  return {
+    subject: `${title} : ${name}`,
+    text: `${name} (${user.email}) ${profileModified ? 'a modifié son profil : son compte attend votre validation' : 'a soumis un dossier à valider'}. Consultez la fiche : ${url}`,
+    html: layout({
+      heading: title,
+      footer: 'Système de supervision DealAutoPro',
+      body: `
+        <p style="color: #1A2230; font-size: 16px;">Bonjour,</p>
+        <p style="color: #5A5E66; font-size: 14px;">${profileModified ? 'Un compte déjà validé a été modifié et attend votre décision.' : 'Un nouveau dossier d\'inscription attend votre décision.'}</p>
+        <div style="background-color: #fff7f1; border-left: 4px solid #B04A2C; padding: 15px; margin: 20px 0;">
+          <p style="margin: 0 0 10px 0;"><strong>Compte :</strong> ${name}</p>
+          <p style="margin: 0 0 10px 0;"><strong>Rôle :</strong> ${roleLabel}</p>
+          <p style="margin: 0;"><strong>E-mail :</strong> ${user.email}</p>
+        </div>
+        <div style="text-align: center; margin: 30px 0;">
+          <a href="${url}" style="background-color: #B04A2C; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold;">Prendre une décision</a>
+        </div>
+      `
+    })
+  };
+};
+
 /** Alerte lorsqu'un véhicule atteint le seuil de mises en vente configuré. */
 const adminVehicleMaxAttemptsEmail = ({ dossierId, vehicleLabel, registrationNumber, sellerLabel, listingCount }) => {
   const adminBaseUrl = process.env.ADMIN_BASE_URL || process.env.ADMIN_URL || 'http://localhost:3002';
@@ -1547,6 +1577,7 @@ const saleWaitingListEmail = ({ user, brand, model, year, photoUrl, sessionName,
 };
 
 module.exports = {
+  adminAccountToValidateEmail,
   SUPPORTED_LANGUAGES,
   normalizeLanguage,
   otpEmail,

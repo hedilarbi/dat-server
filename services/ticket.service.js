@@ -2,7 +2,7 @@ const Ticket = require('../models/ticket.model');
 const User = require('../models/user.model');
 const { sendEmail } = require('../config/mail');
 const { supportTicketAdminReplyEmail } = require('./emailTemplates.service');
-const { createAdminTicketNotification } = require('./notification.service');
+const { createAdminTicketNotification, createAdminTicketReplyNotification, createSellerNotification } = require('./notification.service');
 
 /**
  * Notifie l'administrateur (centre de notifications in-app) qu'un nouveau ticket a été créé.
@@ -14,6 +14,35 @@ const notifyAdminOfNewTicket = async (ticket, userId) => {
     if (user) await createAdminTicketNotification(ticket, user);
   } catch (err) {
     console.error(`Erreur lors de la notification admin (nouveau ticket support) : ${err.message}`);
+  }
+};
+
+/** Réponse de l'utilisateur sur un ticket existant : notification in-app à l'admin (sans jamais bloquer l'envoi). */
+const notifyAdminOfUserReply = async (ticket, userId) => {
+  try {
+    const user = await User.findById(userId).select('companyName');
+    if (user) await createAdminTicketReplyNotification(ticket, user);
+  } catch (err) {
+    console.error(`Erreur lors de la notification admin (réponse support) : ${err.message}`);
+  }
+};
+
+/** Réponse de l'admin : notification in-app pour un vendeur (le centre de notifications est réservé aux vendeurs ; les acheteurs reçoivent l'e-mail). */
+const notifySellerInApp = async (ticket) => {
+  try {
+    const ownerId = ticket.user?._id || ticket.user;
+    const owner = await User.findById(ownerId).select('role').lean();
+    if (owner?.role !== 'vendeur') return;
+    await createSellerNotification({
+      sellerId: ownerId,
+      type: 'support_reply',
+      category: 'support',
+      title: 'Réponse du support',
+      message: `L'équipe DealAutoPro a répondu à votre demande : "${ticket.title}".`,
+      metadata: { ticketId: String(ticket._id) }
+    });
+  } catch (err) {
+    console.error(`Erreur lors de la notification vendeur (réponse support) : ${err.message}`);
   }
 };
 
@@ -184,6 +213,9 @@ const addMessageToTicket = async (ticketId, userId, userRole, messageData) => {
 
   if (userRole === 'admin') {
     await notifyUserOfAdminReply(ticket, content);
+    await notifySellerInApp(ticket);
+  } else {
+    await notifyAdminOfUserReply(ticket, userId);
   }
 
   // Recharger le ticket avec les populations

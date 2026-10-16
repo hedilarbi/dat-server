@@ -551,17 +551,21 @@ const getDashboardStats = async () => {
   const validatedUsersCount = await User.countDocuments({ status: 'valide', role: { $in: ['acheteur', 'vendeur'] } });
   
   // Total transaction volume
-  const sales = await Sale.find({ status: { $in: ['en_attente_paiement', 'paye', 'cloture'] } });
-  const totalTransactionVolume = sales.reduce((acc, sale) => acc + (sale.winningOfferAmount || 0), 0);
+  const sales = await Sale.find({ status: 'cloturee' }).select('amount winningOfferAmount');
+  const totalTransactionVolume = sales.reduce((acc, sale) => acc + (sale.amount || sale.winningOfferAmount || 0), 0);
   
   // Completed sales count
-  const completedSalesCount = await Sale.countDocuments({ status: 'cloture' });
+  const completedSalesCount = await Sale.countDocuments({ status: 'cloturee' });
 
   // Recent activities (last 5 users)
   const recentUsers = await User.find({ role: { $in: ['acheteur', 'vendeur'] } })
     .sort({ createdAt: -1 })
     .limit(5)
     .select('firstName lastName companyName role email createdAt status');
+  const [blockedBuyersCount, blockedSellersCount] = await Promise.all([
+    User.countDocuments({ status: STATUS_GROUP_MAP.suspendu, role: 'acheteur' }),
+    User.countDocuments({ status: STATUS_GROUP_MAP.suspendu, role: 'vendeur' }),
+  ]);
   // Ventes critiques (définition commune avec le filtre de la liste des ventes)
   const latePaymentSales = (await findCriticalSales(Sale, { populate: true })).map((sale) => ({
     ...sale,
@@ -588,6 +592,9 @@ const getDashboardStats = async () => {
       unsoldVehicles: maxedOut.total,
       unsoldThreshold: maxedOut.threshold,
       waitingVehicles: vehicleStates.counts?.en_attente || 0,
+      blockedBuyers: blockedBuyersCount,
+      blockedSellers: blockedSellersCount,
+      blockedAccounts: blockedBuyersCount + blockedSellersCount,
     },
     kpis: {
       activeSessions: activeSessionsCount,

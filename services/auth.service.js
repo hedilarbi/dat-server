@@ -4,7 +4,7 @@ const { isValidPhoneNumber } = require('libphonenumber-js');
 const { sendEmail } = require('../config/mail');
 const { createAdminRegistrationNotification } = require('./notification.service');
 const { buildProfileChanges, applyProfileChanges } = require('../utils/profileChanges');
-const { normalizeLanguage, otpEmail, passwordResetEmail } = require('./emailTemplates.service');
+const { normalizeLanguage, otpEmail, passwordResetEmail, adminAccountToValidateEmail } = require('./emailTemplates.service');
 const paymentService = require('./payment.service');
 const { isStripeConfigured } = require('../config/stripe');
 const Sale = require('../models/sale.model');
@@ -369,6 +369,7 @@ const registerStep2 = async (userId, profileData) => {
 
   await user.save();
   await createAdminRegistrationNotification(user);
+  await emailAdminAccountToValidate(user);
 
   const userObj = user.toObject();
   delete userObj.password;
@@ -403,10 +404,22 @@ const cancelLiveOffersOf = async (userId) => {
   }
 };
 
+/** E-mail à l'administrateur : un compte attend sa décision. N'échoue jamais l'opération appelante. */
+const emailAdminAccountToValidate = async (user, { profileModified = false } = {}) => {
+  try {
+    const config = await generalConfigService.getConfig();
+    const to = config?.adminEmail || 'contact@dealautopro.com';
+    await sendEmail({ to, ...adminAccountToValidateEmail({ user, profileModified }) });
+  } catch (error) {
+    console.error(`E-mail admin (compte à valider) impossible (${user.email}) : ${error.message}`);
+  }
+};
+
 /** Prévient l'admin qu'un compte validé repasse en attente après une modification de profil. */
 const notifyAdminProfileModified = async (user) => {
   try {
     await createAdminRegistrationNotification(user, { profileModified: true });
+    await emailAdminAccountToValidate(user, { profileModified: true });
   } catch (error) {
     // La modification est déjà enregistrée : un échec de notification ne doit pas l'annuler
     console.error(`Notification admin de modification de profil impossible (${user.email}) : ${error.message}`);

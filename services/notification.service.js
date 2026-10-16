@@ -231,6 +231,25 @@ const createAdminTicketNotification = async (ticket, user) => {
   });
 };
 
+/** Un utilisateur a répondu sur un ticket de support existant : l'admin en est prévenu dans son centre de notifications. */
+const createAdminTicketReplyNotification = async (ticket, user) => {
+  return Notification.create({
+    recipientRole: 'admin',
+    type: 'ticket_created',
+    category: 'support',
+    title: 'Nouveau message de support',
+    message: `${user.companyName} a répondu à sa demande de support : "${ticket.title}".`,
+    createdByUser: user._id,
+    metadata: {
+      ticketId: ticket._id.toString(),
+      userId: user._id.toString(),
+      companyName: user.companyName,
+      category: ticket.category,
+      title: ticket.title
+    }
+  });
+};
+
 const markNotificationAsRead = async (notificationId) => {
   const notification = await Notification.findOneAndUpdate(
     { _id: notificationId, recipientRole: 'admin' },
@@ -364,6 +383,7 @@ module.exports = {
   createAdminVehicleDossierChangedNotification,
   createAdminVehicleMaxAttemptsNotification,
   createAdminTicketNotification,
+  createAdminTicketReplyNotification,
   createAdminLatePaymentNotification,
   createAdminSaleDeadlineSuspensionNotification,
   createAdminSellerEarlyAcceptanceNotification,

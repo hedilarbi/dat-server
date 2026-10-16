@@ -181,7 +181,7 @@ const pickEditableFields = (payload) => {
 const assertSubmittable = (dossier) => {
   const missing = [];
 
-  const requiredFields = ['brand', 'model', 'year', 'mileage', 'engine', 'fuelType', 'vin', 'description', 'reservePrice'];
+  const requiredFields = ['brand', 'model', 'year', 'mileage', 'fuelType', 'vin', 'description', 'reservePrice'];
   for (const field of requiredFields) {
     if (dossier[field] === undefined || dossier[field] === null || dossier[field] === '') {
       missing.push(field);
