@@ -728,7 +728,10 @@ const updateStamp = async (userId, stampUrl) => {
   // première fois n'en est pas une — il est exigé pour établir les documents d'une vente en cours,
   // qui ne doit pas être bloquée pour autant.
   const replacesStamp = Boolean(user.stampUrl && normalized && normalized !== user.stampUrl);
-  const staged = replacesStamp && (user.status === 'valide' || user.profileChangePending);
+  // Exception : si l'autre partie d'une vente a signalé ce tampon à l'étape 3.2, le remplacement
+  // s'applique immédiatement pour que les documents soient régénérés et la vente débloquée.
+  const stampDisputed = replacesStamp && await require('./sale.service').hasOpenStampReportAgainst(user._id);
+  const staged = replacesStamp && !stampDisputed && (user.status === 'valide' || user.profileChangePending);
   if (staged) {
     const firstRequest = user.status === 'valide';
     user.pendingProfile = {

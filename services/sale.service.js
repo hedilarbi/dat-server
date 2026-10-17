@@ -2383,6 +2383,28 @@ const prepareSaleDocuments = async (saleId, { triggeredBy, regenerate = false } 
   return true;
 };
 
+const STAMP_REPORT_REASONS = ['tampon_manquant', 'mauvais_tampon'];
+
+/**
+ * Vrai quand l'autre partie d'une vente a signalé le tampon de cet utilisateur à l'étape 3.2 :
+ * son nouveau tampon doit alors s'appliquer tout de suite, sans attendre la validation d'un
+ * changement de profil, sinon la vente resterait bloquée sur le document contesté.
+ */
+const hasOpenStampReportAgainst = async (userId) => {
+  const sales = await Sale.find({
+    status: 'en_cours',
+    currentStep: STEP.VERIFICATION,
+    'documentsReview.version': { $gt: 0 },
+    'documentsReview.correctionOpen': true,
+    $or: [{ seller: userId }, { winner: userId }],
+  }).select('seller documentsReview').lean();
+  return sales.some((sale) => {
+    const otherSide = String(sale.seller) === String(userId) ? 'buyer' : 'seller';
+    const report = sale.documentsReview?.[otherSide];
+    return report?.decision === 'erreur' && STAMP_REPORT_REASONS.includes(report.reason);
+  });
+};
+
 /** Un tampon vient d'être déposé : génère les documents des ventes qui n'attendaient que lui. */
 const prepareDocumentsForUser = async (userId) => {
   const sales = await Sale.find({
@@ -2403,7 +2425,7 @@ const prepareDocumentsForUser = async (userId) => {
   // Un tampon signalé comme manquant ou mauvais vient d'être corrigé : les documents sont régénérés
   // avec les tampons actuels des deux parties. Quand chacune corrige le sien, le dernier dépôt
   // produit donc des documents qui réunissent les deux corrections.
-  const STAMP_REASONS = ['tampon_manquant', 'mauvais_tampon'];
+  const STAMP_REASONS = STAMP_REPORT_REASONS;
   const disputed = await Sale.find({
     status: 'en_cours',
     currentStep: STEP.VERIFICATION,
@@ -3143,6 +3165,7 @@ module.exports = {
   confirmTransferReceived,
   submitRegistrationCard,
   prepareDocumentsForUser,
+  hasOpenStampReportAgainst,
   reviewDocuments,
   uploadReviewDocument,
   reconcilePendingDocuments,
