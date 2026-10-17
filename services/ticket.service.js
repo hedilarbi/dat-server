@@ -1,8 +1,23 @@
 const Ticket = require('../models/ticket.model');
 const User = require('../models/user.model');
 const { sendEmail } = require('../config/mail');
-const { supportTicketAdminReplyEmail } = require('./emailTemplates.service');
+const { supportTicketAdminReplyEmail, adminSupportTicketEmail } = require('./emailTemplates.service');
+const generalConfigService = require('./generalConfig.service');
 const { createAdminTicketNotification, createAdminTicketReplyNotification, createUserNotification } = require('./notification.service');
+
+/** E-mail à l'administrateur pour une demande ou un message de support ; n'échoue jamais l'opération appelante. */
+const emailAdminOfTicket = async (ticket, userId, content, isReply) => {
+  try {
+    const [user, config] = await Promise.all([
+      User.findById(userId).select('companyName firstName lastName email').lean(),
+      generalConfigService.getConfig(),
+    ]);
+    if (!user) return;
+    await sendEmail({ to: config?.adminEmail || 'contact@dealautopro.com', ...adminSupportTicketEmail({ user, ticket, content, isReply }) });
+  } catch (err) {
+    console.error(`Erreur lors de l'e-mail admin (support) : ${err.message}`);
+  }
+};
 
 /**
  * Notifie l'administrateur (centre de notifications in-app) qu'un nouveau ticket a été créé.
@@ -12,6 +27,7 @@ const notifyAdminOfNewTicket = async (ticket, userId) => {
   try {
     const user = await User.findById(userId).select('companyName');
     if (user) await createAdminTicketNotification(ticket, user);
+    await emailAdminOfTicket(ticket, userId, ticket.messages?.[0]?.content, false);
   } catch (err) {
     console.error(`Erreur lors de la notification admin (nouveau ticket support) : ${err.message}`);
   }
@@ -22,6 +38,7 @@ const notifyAdminOfUserReply = async (ticket, userId) => {
   try {
     const user = await User.findById(userId).select('companyName');
     if (user) await createAdminTicketReplyNotification(ticket, user);
+    await emailAdminOfTicket(ticket, userId, ticket.messages?.[ticket.messages.length - 1]?.content, true);
   } catch (err) {
     console.error(`Erreur lors de la notification admin (réponse support) : ${err.message}`);
   }
@@ -210,8 +227,9 @@ const addMessageToTicket = async (ticketId, userId, userRole, messageData) => {
   await ticket.save();
 
   if (userRole === 'admin') {
-    await notifyUserOfAdminReply(ticket, content);
+    // Notification d'abord : un échec d'envoi de l'e-mail ne doit pas la supprimer
     await notifySellerInApp(ticket);
+    await notifyUserOfAdminReply(ticket, content);
   } else {
     await notifyAdminOfUserReply(ticket, userId);
   }

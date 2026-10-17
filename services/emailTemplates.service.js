@@ -1821,3 +1821,30 @@ const supportTicketAdminReplyEmail = ({ user, ticket, content }) => {
 };
 
 module.exports.supportTicketAdminReplyEmail = supportTicketAdminReplyEmail;
+
+/** Prévient l'admin d'une nouvelle demande de support ou d'un nouveau message de l'utilisateur. */
+const adminSupportTicketEmail = ({ user, ticket, content, isReply = false }) => {
+  const adminBaseUrl = process.env.ADMIN_BASE_URL || process.env.ADMIN_URL || 'http://localhost:3002';
+  const url = `${adminBaseUrl}/support?ticketId=${ticket._id}`;
+  const escapeHtml = (value) => String(value || '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
+  const name = user.companyName || [user.firstName, user.lastName].filter(Boolean).join(' ') || user.email || 'Utilisateur';
+  const preview = String(content || '').replace(/\s+/g, ' ').trim().slice(0, 500);
+  const heading = isReply ? 'Nouveau message de support' : 'Nouvelle demande de support';
+
+  return {
+    subject: `${heading} - ${ticket.title} - ${name}`,
+    text: `${name} ${isReply ? 'a répondu à' : 'a ouvert'} la demande « ${ticket.title} ». ${preview ? `Message : ${preview}. ` : ''}Consultez-la : ${url}`,
+    html: layout({
+      heading,
+      footer: 'Système de supervision DealAutoPro',
+      body: `
+        <p style="color:#1A2230;font-size:16px;">Bonjour,</p>
+        <p style="color:#5A5E66;font-size:14px;"><strong>${escapeHtml(name)}</strong> ${isReply ? 'a répondu à' : 'a ouvert'} la demande « ${escapeHtml(ticket.title)} » (${escapeHtml(ticket.category)} · priorité ${escapeHtml(ticket.priority)}).</p>
+        ${preview ? `<div style="margin:18px 0;padding:14px;border-left:4px solid #D9704F;background:#FFFFFF;color:#1A2230;font-size:14px;">${escapeHtml(preview)}</div>` : ''}
+        <div style="text-align:center;margin:30px 0;"><a href="${url}" style="background-color:#D9704F;color:white;padding:12px 25px;text-decoration:none;border-radius:5px;font-weight:bold;">Ouvrir la demande</a></div>
+      `,
+    }),
+  };
+};
+
+module.exports.adminSupportTicketEmail = adminSupportTicketEmail;
