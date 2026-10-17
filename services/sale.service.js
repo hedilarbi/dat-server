@@ -1046,33 +1046,7 @@ const settleCommissionPayment = async (sale, { paymentIntentId, amount, currency
     console.error('Erreur enregistrement Payment commission:', err.message);
   }
 
-  // La commission encaissée confirme l'acheteur : le vendeur peut maintenant surveiller
-  // son compte bancaire et valider le virement depuis la page de cette vente.
-  try {
-    const [saleContext, seller] = await Promise.all([
-      Sale.findById(sale._id)
-        .populate('vehicle', 'brand model year photos')
-        .populate('session', 'name')
-        .lean(),
-      User.findById(sale.seller).select('email firstName lastName language role').lean(),
-    ]);
-    if (seller) {
-      const vehicle = saleContext?.vehicle;
-      const email = emailTemplates.saleBuyerConfirmedSellerEmail({
-        user: seller,
-        brand: vehicle?.brand || '',
-        model: vehicle?.model || '',
-        year: vehicle?.year || null,
-        photoUrl: coverUrl(vehicle),
-        sessionName: saleContext?.session?.name || '',
-        saleId: String(sale._id),
-      });
-      await sendEmail({ to: seller.email, subject: email.subject, text: email.text, html: email.html });
-      await notifySellerInApp(seller._id, 'buyer_confirmed', 'Acheteur confirmé', 'Le paiement de la commission est confirmé. Vérifiez maintenant la réception du virement.', sale, vehicle);
-    }
-  } catch (err) {
-    console.error(`Impossible d'envoyer la confirmation de l'acheteur au vendeur (vente ${sale._id}) :`, err.message);
-  }
+  // Le vendeur n'est volontairement pas prévenu (ni e-mail ni notification) du paiement de la commission.
 
   return sale;
 };
