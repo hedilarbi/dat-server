@@ -71,8 +71,11 @@ const getAdminNotifications = async () => {
   return { notifications, unreadCount };
 };
 
+// Acheteurs et vendeurs partagent le même centre : un vendeur qui achète y retrouve aussi ses achats.
+const USER_ROLES = ['vendeur', 'acheteur'];
+
 const getSellerNotifications = async (sellerId) => {
-  const scope = { recipientRole: 'vendeur', recipientUser: sellerId };
+  const scope = { recipientRole: { $in: USER_ROLES }, recipientUser: sellerId };
   const [notifications, unreadCount] = await Promise.all([
     Notification.find(scope).sort({ createdAt: -1 }).limit(50).lean(),
     Notification.countDocuments({ ...scope, readAt: null })
@@ -80,13 +83,15 @@ const getSellerNotifications = async (sellerId) => {
   return { notifications: await enrichSellerNotifications(notifications), unreadCount };
 };
 
-const createSellerNotification = async ({ sellerId, type, category = 'autre', title, message, metadata = {} }) => {
+const createSellerNotification = async ({ sellerId, userId, role, type, category = 'autre', title, message, metadata = {} }) => {
+  const recipientId = userId || sellerId;
+  const recipientRole = role || 'vendeur';
   const vehicle = await findNotificationVehicle(metadata);
   const vehicleDetails = vehicleDetailsOf(vehicle);
   const enrichedMetadata = vehicleDetails ? { ...metadata, vehicleDetails } : metadata;
   return Notification.create({
-    recipientRole: 'vendeur',
-    recipientUser: sellerId,
+    recipientRole,
+    recipientUser: recipientId,
     type,
     category,
     title,
@@ -97,7 +102,7 @@ const createSellerNotification = async ({ sellerId, type, category = 'autre', ti
 
 const markSellerNotificationAsRead = async (notificationId, sellerId) => {
   const notification = await Notification.findOneAndUpdate(
-    { _id: notificationId, recipientRole: 'vendeur', recipientUser: sellerId },
+    { _id: notificationId, recipientRole: { $in: USER_ROLES }, recipientUser: sellerId },
     { $set: { readAt: new Date() } },
     { new: true }
   );
@@ -111,7 +116,7 @@ const markSellerNotificationAsRead = async (notificationId, sellerId) => {
 
 const markAllSellerNotificationsAsRead = async (sellerId) => {
   await Notification.updateMany(
-    { recipientRole: 'vendeur', recipientUser: sellerId, readAt: null },
+    { recipientRole: { $in: USER_ROLES }, recipientUser: sellerId, readAt: null },
     { $set: { readAt: new Date() } }
   );
   return { message: 'Notifications marquées comme lues.' };
@@ -372,7 +377,19 @@ const createAdminCertificateRejectedNotification = async (sale, vehicle, buyer, 
   });
 };
 
+/** Notification in-app d'un acheteur (ou d'un vendeur qui achète) ; le rôle du destinataire est lu en base si absent. */
+const createUserNotification = async ({ userId, role, ...rest }) => {
+  let recipientRole = role;
+  if (!recipientRole) {
+    const User = require('../models/user.model');
+    recipientRole = (await User.findById(userId).select('role').lean())?.role;
+  }
+  if (!USER_ROLES.includes(recipientRole)) return null;
+  return createSellerNotification({ userId, role: recipientRole, ...rest });
+};
+
 module.exports = {
+  createUserNotification,
   getAdminNotifications,
   getSellerNotifications,
   createSellerNotification,

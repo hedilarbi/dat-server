@@ -2,7 +2,7 @@ const Ticket = require('../models/ticket.model');
 const User = require('../models/user.model');
 const { sendEmail } = require('../config/mail');
 const { supportTicketAdminReplyEmail } = require('./emailTemplates.service');
-const { createAdminTicketNotification, createAdminTicketReplyNotification, createSellerNotification } = require('./notification.service');
+const { createAdminTicketNotification, createAdminTicketReplyNotification, createUserNotification } = require('./notification.service');
 
 /**
  * Notifie l'administrateur (centre de notifications in-app) qu'un nouveau ticket a été créé.
@@ -27,14 +27,12 @@ const notifyAdminOfUserReply = async (ticket, userId) => {
   }
 };
 
-/** Réponse de l'admin : notification in-app pour un vendeur (le centre de notifications est réservé aux vendeurs ; les acheteurs reçoivent l'e-mail). */
+/** Réponse de l'admin : notification in-app pour l'acheteur ou le vendeur. */
 const notifySellerInApp = async (ticket) => {
   try {
     const ownerId = ticket.user?._id || ticket.user;
-    const owner = await User.findById(ownerId).select('role').lean();
-    if (owner?.role !== 'vendeur') return;
-    await createSellerNotification({
-      sellerId: ownerId,
+    await createUserNotification({
+      userId: ownerId,
       type: 'support_reply',
       category: 'support',
       title: 'Réponse du support',

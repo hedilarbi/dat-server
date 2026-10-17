@@ -3,7 +3,7 @@ const mongoose = require('mongoose');
 const notificationSchema = new mongoose.Schema({
   recipientRole: {
     type: String,
-    enum: ['admin', 'vendeur'],
+    enum: ['admin', 'vendeur', 'acheteur'],
     required: true,
     index: true
   },

@@ -197,8 +197,8 @@ const discardProfileChange = async (user, { motifs, comment }) => {
 
   try {
     await sendEmail({ to: user.email, ...profileChangeRejectedEmail({ user, reasonsText, reasonsPlain, comment }) });
-    if (user.role === 'vendeur') await notificationService.createSellerNotification({
-      sellerId: user._id, type: 'profile_change_rejected', category: 'inscription',
+    await notificationService.createUserNotification({
+      userId: user._id, role: user.role, type: 'profile_change_rejected', category: 'inscription',
       title: 'Modification de compte refusée', message: `Votre demande de modification n'a pas été acceptée : ${reasonsPlain}.`
     });
   } catch (emailError) {
@@ -280,9 +280,9 @@ const approveUser = async (userId) => {
       to: user.email,
       ...(wasProfileChange ? profileChangeApprovedEmail(user) : approvalEmail(user))
     });
-    if (user.role === 'vendeur') await notificationService.createSellerNotification({
-      sellerId: user._id, type: 'account_approved', category: 'inscription',
-      title: 'Compte vendeur validé', message: 'Votre compte professionnel a été validé.'
+    await notificationService.createUserNotification({
+      userId: user._id, role: user.role, type: 'account_approved', category: 'inscription',
+      title: wasProfileChange ? 'Modification de compte validée' : 'Compte validé', message: wasProfileChange ? 'Vos modifications de profil ont été validées.' : 'Votre compte professionnel a été validé.'
     });
   } catch (emailError) {
     console.error(`Erreur d'envoi du mail d'approbation : ${emailError.message}`);
@@ -363,8 +363,8 @@ const rejectUser = async (userId, { motifs, comment }) => {
       to: user.email,
       ...rejectionEmail({ user, reasonsText, reasonsPlain, comment })
     });
-    if (user.role === 'vendeur') await notificationService.createSellerNotification({
-      sellerId: user._id, type: 'account_rejected', category: 'inscription',
+    await notificationService.createUserNotification({
+      userId: user._id, role: user.role, type: 'account_rejected', category: 'inscription',
       title: 'Inscription refusée', message: `Votre inscription a été refusée : ${reasonsPlain}.`
     });
   } catch (emailError) {
@@ -441,8 +441,8 @@ const requestCorrection = async (userId, { motifs, comment }) => {
       to: user.email,
       ...correctionEmail({ user, reasonsText, reasonsPlain, comment })
     });
-    if (user.role === 'vendeur') await notificationService.createSellerNotification({
-      sellerId: user._id, type: 'account_correction_requested', category: 'inscription',
+    await notificationService.createUserNotification({
+      userId: user._id, role: user.role, type: 'account_correction_requested', category: 'inscription',
       title: 'Correction demandée', message: `Votre inscription doit être corrigée : ${reasonsPlain}.`
     });
   } catch (emailError) {
@@ -513,6 +513,19 @@ const updateUserStatus = async (userId, newStatus, { suspensionNote } = {}) => {
 
   user.status = newStatus;
   await user.save();
+
+  // Notification in-app du titulaire : suspension, blocage ou réactivation de son compte
+  try {
+    const suspensionTexts = {
+      suspendu: ['Compte suspendu', 'Votre compte a été suspendu par l’administration. Contactez le support pour plus d’informations.'],
+      bloque: ['Compte bloqué', 'Votre compte a été bloqué par l’administration. Contactez le support pour plus d’informations.'],
+      valide: ['Compte réactivé', 'Votre compte a été réactivé : vous pouvez de nouveau utiliser la plateforme.'],
+    };
+    const [title, message] = suspensionTexts[newStatus];
+    await notificationService.createUserNotification({ userId: user._id, role: user.role, type: `account_${newStatus}`, category: 'inscription', title, message });
+  } catch (notificationError) {
+    console.error(`Notification de changement de statut impossible (${user._id}) : ${notificationError.message}`);
+  }
 
   // Un vendeur achète aussi : il suit les mêmes règles que l'acheteur sur ses achats (ceux
   // encore à l'étape 1 sont réattribués), et ses véhicules sortent en plus des sessions pas
