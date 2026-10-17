@@ -35,10 +35,19 @@ const SUSPENSION_NOTES = {
   penalite_etape_2: "N'a pas effectué le virement dans les délais prévus.",
 };
 
-const notifySellerInApp = async (sellerId, type, title, message, sale, vehicle) => {
+/**
+ * Notification in-app d'un acheteur ou d'un vendeur. `title`/`message` sont en français ; `en`
+ * ({ title, message }) donne la version anglaise, utilisée si le compte du destinataire est en anglais.
+ */
+const notifySellerInApp = async (sellerId, type, title, message, sale, vehicle, en = null) => {
   try {
+    let text = { title, message };
+    if (en) {
+      const recipient = await User.findById(sellerId).select('language').lean();
+      if (recipient?.language === 'en') text = en;
+    }
     await notificationService.createUserNotification({
-      userId: sellerId, type, category: 'ventes', title, message,
+      userId: sellerId, type, category: 'ventes', title: text.title, message: text.message,
       metadata: {
         // Côté de l'utilisateur sur la vente : oriente le lien de la notification (achat ou vente)
         side: sale?.winner && String(sale.winner) === String(sellerId) ? 'buyer' : 'seller',
@@ -132,7 +141,7 @@ const notifyWinner = async (sale, vehicle, session, deadlineHours) => {
     });
 
     await sendEmail({ to: winner.email, subject: email.subject, text: email.text, html: email.html });
-    await notifySellerInApp(winner._id, 'sale_won', 'Véhicule remporté', `Votre offre a été retenue. Vous avez ${deadlineHours} h pour régler la commission.`, sale, vehicle);
+    await notifySellerInApp(winner._id, 'sale_won', 'Véhicule remporté', `Votre offre a été retenue. Vous avez ${deadlineHours} h pour régler la commission.`, sale, vehicle, { title: 'Vehicle won', message: `Your offer has been selected. You have ${deadlineHours} h to pay the commission.` });
   } catch (error) {
     console.error(`Notification du gagnant impossible (vente ${sale._id}) : ${error.message}`);
   }
@@ -177,7 +186,7 @@ const notifyWaitingList = async (sale, vehicle, session) => {
       });
 
       await sendEmail({ to: buyer.email, subject: email.subject, text: email.text, html: email.html });
-      await notifySellerInApp(buyer._id, 'sale_waiting_list', 'Liste d’attente', `Votre offre est en rang ${entry.rank} : elle reprendra la main si l’acheteur retenu est écarté.`, sale, vehicle);
+      await notifySellerInApp(buyer._id, 'sale_waiting_list', 'Liste d’attente', `Votre offre est en rang ${entry.rank} : elle reprendra la main si l’acheteur retenu est écarté.`, sale, vehicle, { title: 'Waiting list', message: `Your offer is ranked ${entry.rank}: it will take over if the selected buyer is removed.` });
       entry.topThreeEmailSentAt = new Date();
       await sale.save();
     } catch (error) {
@@ -202,7 +211,7 @@ const notifyReattributedParties = async (sale, entry, vehicle, session, deadline
         amount: entry.amount, deadlineHours,
       });
       await sendEmail({ to: candidate.email, subject: email.subject, text: email.text, html: email.html });
-      await notifySellerInApp(candidate._id, 'sale_reattributed_winner', 'Véhicule attribué', `Le véhicule vous est attribué (${entry.amount} €). Vous avez ${deadlineHours} h pour régler la commission.`, sale, vehicle);
+      await notifySellerInApp(candidate._id, 'sale_reattributed_winner', 'Véhicule attribué', `Le véhicule vous est attribué (${entry.amount} €). Vous avez ${deadlineHours} h pour régler la commission.`, sale, vehicle, { title: 'Vehicle awarded', message: `The vehicle has been awarded to you (${entry.amount} €). You have ${deadlineHours} h to pay the commission.` });
       entry.promotionEmailSentAt = new Date();
       await sale.save();
     } catch (err) {
@@ -219,7 +228,7 @@ const notifyReattributedParties = async (sale, entry, vehicle, session, deadline
         amount: entry.amount, rank: entry.rank,
       });
       await sendEmail({ to: seller.email, subject: email.subject, text: email.text, html: email.html });
-      await notifySellerInApp(seller._id, 'sale_reattributed', 'Nouvel acheteur retenu', `Une nouvelle offre a été retenue pour votre véhicule.`, sale, vehicle);
+      await notifySellerInApp(seller._id, 'sale_reattributed', 'Nouvel acheteur retenu', `Une nouvelle offre a été retenue pour votre véhicule.`, sale, vehicle, { title: 'New buyer selected', message: 'A new offer has been selected for your vehicle.' });
       entry.sellerPromotionEmailSentAt = new Date();
       await sale.save();
     } catch (err) {
@@ -250,7 +259,7 @@ const notifySellerAwarded = async (sale, vehicle, session, { email: sendSellerEm
       });
       await sendEmail({ to: seller.email, subject: email.subject, text: email.text, html: email.html });
     }
-    await notifySellerInApp(seller._id, 'sale_awarded', 'Offre retenue', `Une offre a été retenue pour votre véhicule.`, sale, vehicle);
+    await notifySellerInApp(seller._id, 'sale_awarded', 'Offre retenue', `Une offre a été retenue pour votre véhicule.`, sale, vehicle, { title: 'Offer selected', message: 'An offer has been selected for your vehicle.' });
   } catch (error) {
     console.error(`Notification du vendeur impossible (vente ${sale._id}) : ${error.message}`);
   }
@@ -290,7 +299,7 @@ const notifySellerUnsold = async (sale, vehicle, session, {
       });
       await sendEmail({ to: seller.email, subject: email.subject, text: email.text, html: email.html });
     }
-    await notifySellerInApp(seller._id, 'sale_unsold', 'Véhicule en attente de votre décision', `La session est terminée. Consultez les offres reçues pour votre véhicule.`, sale, vehicle);
+    await notifySellerInApp(seller._id, 'sale_unsold', 'Véhicule en attente de votre décision', `La session est terminée. Consultez les offres reçues pour votre véhicule.`, sale, vehicle, { title: 'Vehicle awaiting your decision', message: 'The session has ended. Review the offers received for your vehicle.' });
   } catch (error) {
     console.error(`Notification d'invendu impossible (vente ${sale._id}) : ${error.message}`);
   }
@@ -599,7 +608,10 @@ const notifySellerReattributionExhausted = async (sale, suspended = false, selle
       sellerDecisionDeadlineHours,
     });
     await sendEmail({ to: seller.email, ...email });
-    await notifySellerInApp(seller._id, 'sale_reattribution_exhausted', suspended ? 'Véhicule suspendu' : 'Véhicule à nouveau disponible', suspended ? 'Aucun acheteur éligible ne reste. Vous pouvez choisir une offre ou remettre le véhicule en vente.' : 'Aucun acheteur éligible ne reste. Le véhicule peut être remis en session.', sale, vehicle);
+    await notifySellerInApp(seller._id, 'sale_reattribution_exhausted', suspended ? 'Véhicule suspendu' : 'Véhicule à nouveau disponible', suspended ? 'Aucun acheteur éligible ne reste. Vous pouvez choisir une offre ou remettre le véhicule en vente.' : 'Aucun acheteur éligible ne reste. Le véhicule peut être remis en session.', sale, vehicle, {
+      title: suspended ? 'Vehicle suspended' : 'Vehicle available again',
+      message: suspended ? 'No eligible buyer remains. You can choose an offer or put the vehicle back on sale.' : 'No eligible buyer remains. The vehicle can be put back in a session.',
+    });
   } catch (error) {
     console.error(`Notification de retour en attente impossible (vente ${sale._id}) : ${error.message}`);
   }
@@ -1281,7 +1293,7 @@ const notifyBuyer = async (buyerId, build, inApp = null) => {
     if (!buyer) return;
     const email = build(buyer);
     await sendEmail({ to: buyer.email, subject: email.subject, text: email.text, html: email.html });
-    if (inApp) await notifySellerInApp(buyer._id, inApp.type, inApp.title, inApp.message, inApp.sale, inApp.vehicle);
+    if (inApp) await notifySellerInApp(buyer._id, inApp.type, inApp.title, inApp.message, inApp.sale, inApp.vehicle, inApp.en);
   } catch (error) {
     console.error(`Notification de l'acheteur impossible : ${error.message}`);
   }
@@ -1432,6 +1444,10 @@ const processStepDeadlines = async () => {
           type: 'sale_winner_removed',
           title: suspended ? 'Achat annulé et compte suspendu' : 'Achat annulé',
           message: suspended ? 'Le délai est dépassé : votre achat est annulé et votre compte est suspendu.' : 'Le délai est dépassé : votre achat est annulé.',
+          en: {
+            title: suspended ? 'Purchase cancelled and account suspended' : 'Purchase cancelled',
+            message: suspended ? 'The deadline has passed: your purchase is cancelled and your account is suspended.' : 'The deadline has passed: your purchase is cancelled.',
+          },
           sale, vehicle,
         });
         continue;
@@ -1464,6 +1480,7 @@ const processStepDeadlines = async () => {
         type: 'sale_step_reminder',
         title: 'Rappel : action attendue',
         message: 'Une étape de votre achat arrive à échéance. Ouvrez la vente pour la terminer.',
+        en: { title: 'Reminder: action required', message: 'A step of your purchase is nearing its deadline. Open the sale to complete it.' },
         sale, vehicle,
       });
 
@@ -1884,7 +1901,10 @@ const notifySaleClosed = async (sale) => {
           const email = emailTemplates.saleClosedEmail({ user, role, ...base });
           await sendEmail({ to: user.email, subject: email.subject, text: email.text, html: email.html });
         }
-        await notifySellerInApp(user._id, 'sale_closed', role === 'vendeur' ? 'Vente terminée' : 'Achat terminé', role === 'vendeur' ? 'La vente de votre véhicule est maintenant clôturée.' : 'Votre achat est finalisé : retrouvez vos documents signés et le bon d’enlèvement.', sale, vehicle);
+        await notifySellerInApp(user._id, 'sale_closed', role === 'vendeur' ? 'Vente terminée' : 'Achat terminé', role === 'vendeur' ? 'La vente de votre véhicule est maintenant clôturée.' : 'Votre achat est finalisé : retrouvez vos documents signés et le bon d’enlèvement.', sale, vehicle, {
+          title: role === 'vendeur' ? 'Sale completed' : 'Purchase completed',
+          message: role === 'vendeur' ? 'The sale of your vehicle is now closed.' : 'Your purchase is complete: find your signed documents and the pick-up order.',
+        });
       } catch (error) {
         console.error(`Notification de clôture impossible (${role}) : ${error.message}`);
       }
@@ -2169,7 +2189,10 @@ const notifySignatureReady = async (user, side, signatureUrl, vehicle, sale) => 
       signatureUrl,
     });
     await sendEmail({ to: user.email, subject: email.subject, text: email.text, html: email.html });
-    await notifySellerInApp(user._id, 'signature_ready', 'Documents à signer', side === 'seller' ? 'L’acheteur a validé les documents : vous pouvez les signer.' : 'Le vendeur a validé les documents : vous pouvez les signer.', sale, vehicle);
+    await notifySellerInApp(user._id, 'signature_ready', 'Documents à signer', side === 'seller' ? 'L’acheteur a validé les documents : vous pouvez les signer.' : 'Le vendeur a validé les documents : vous pouvez les signer.', sale, vehicle, {
+      title: 'Documents to sign',
+      message: side === 'seller' ? 'The buyer has validated the documents: you can sign them.' : 'The seller has validated the documents: you can sign them.',
+    });
   } catch (error) {
     console.error(`Notification de signature OpenAPI impossible pour ${user.email} : ${error.message}`);
   }
@@ -2916,9 +2939,9 @@ const notifyFirstSignature = async (sale, signedSide) => {
   try {
     const vehicle = await VehicleDossier.findById(sale.vehicle).select('brand model').lean();
     if (signedSide === 'buyer') {
-      await notifySellerInApp(sale.seller, 'signature_your_turn', 'À vous de signer', 'L’acheteur a signé les documents. Il ne manque plus que votre signature.', sale, vehicle);
+      await notifySellerInApp(sale.seller, 'signature_your_turn', 'À vous de signer', 'L’acheteur a signé les documents. Il ne manque plus que votre signature.', sale, vehicle, { title: 'Your turn to sign', message: 'The buyer has signed the documents. Only your signature is missing.' });
     } else {
-      await notifySellerInApp(sale.winner, 'signature_your_turn', 'À vous de signer', 'Le vendeur a signé les documents. Il ne manque plus que votre signature.', sale, vehicle);
+      await notifySellerInApp(sale.winner, 'signature_your_turn', 'À vous de signer', 'Le vendeur a signé les documents. Il ne manque plus que votre signature.', sale, vehicle, { title: 'Your turn to sign', message: 'The seller has signed the documents. Only your signature is missing.' });
     }
   } catch (error) {
     console.error(`Notification de première signature impossible (vente ${sale._id}) : ${error.message}`);

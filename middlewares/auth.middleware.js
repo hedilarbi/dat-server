@@ -69,6 +69,16 @@ const protect = async (req, res, next) => {
     }
 
 
+    // Langue de l'interface (web ou application) : elle devient la langue du compte, pour que les
+    // e-mails, notifications et messages push suivent celle que l'utilisateur utilise réellement.
+    const interfaceLanguage = String(req.headers['x-language'] || '').toLowerCase();
+    if (['fr', 'en'].includes(interfaceLanguage) && user.language !== interfaceLanguage && ['acheteur', 'vendeur'].includes(user.role)) {
+      user.language = interfaceLanguage;
+      User.updateOne({ _id: user._id }, { $set: { language: interfaceLanguage } }).catch((error) => {
+        console.error(`Synchronisation de la langue impossible (${user._id}) : ${error.message}`);
+      });
+    }
+
     req.user = user;
     next();
   } catch (error) {

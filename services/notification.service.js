@@ -8,14 +8,17 @@ const vehicleDetailsOf = (vehicle) => vehicle ? {
   model: vehicle.model || null,
 } : null;
 
-const vehicleDetailsText = (details) => details
-  ? `Immatriculation : ${details.registrationNumber || '—'} · Marque : ${details.brand || '—'} · Modèle : ${details.model || '—'}`
-  : null;
+const vehicleDetailsText = (details, language = 'fr') => {
+  if (!details) return null;
+  return language === 'en'
+    ? `Registration: ${details.registrationNumber || '—'} · Make: ${details.brand || '—'} · Model: ${details.model || '—'}`
+    : `Immatriculation : ${details.registrationNumber || '—'} · Marque : ${details.brand || '—'} · Modèle : ${details.model || '—'}`;
+};
 
-const withVehicleDetails = (message, details) => {
-  const text = vehicleDetailsText(details);
-  if (!text || message.includes('Immatriculation :')) return message;
-  return `${message} — Véhicule : ${text}.`;
+const withVehicleDetails = (message, details, language = 'fr') => {
+  const text = vehicleDetailsText(details, language);
+  if (!text || message.includes('Immatriculation :') || message.includes('Registration:')) return message;
+  return `${message} — ${language === 'en' ? 'Vehicle' : 'Véhicule'}${language === 'en' ? ': ' : ' : '}${text}.`;
 };
 
 const findNotificationVehicle = async (metadata = {}) => {
@@ -30,7 +33,7 @@ const findNotificationVehicle = async (metadata = {}) => {
     : null;
 };
 
-const enrichSellerNotifications = async (notifications) => {
+const enrichSellerNotifications = async (notifications, language = 'fr') => {
   const saleIds = notifications
     .filter((notification) => !notification.metadata?.vehicleId && !notification.metadata?.dossierId && notification.metadata?.saleId)
     .map((notification) => notification.metadata.saleId);
@@ -53,7 +56,7 @@ const enrichSellerNotifications = async (notifications) => {
       || notification.metadata?.dossierId
       || vehicleBySale.get(String(notification.metadata?.saleId || ''));
     const details = notification.metadata?.vehicleDetails || detailsByVehicle.get(String(vehicleId || ''));
-    return details ? { ...notification, message: withVehicleDetails(notification.message, details) } : notification;
+    return details ? { ...notification, message: withVehicleDetails(notification.message, details, language) } : notification;
   });
 };
 
@@ -80,12 +83,14 @@ const getSellerNotifications = async (sellerId) => {
     Notification.find(scope).sort({ createdAt: -1 }).limit(50).lean(),
     Notification.countDocuments({ ...scope, readAt: null })
   ]);
-  return { notifications: await enrichSellerNotifications(notifications), unreadCount };
+  const recipient = await require('../models/user.model').findById(sellerId).select('language').lean();
+  return { notifications: await enrichSellerNotifications(notifications, recipient?.language === 'en' ? 'en' : 'fr'), unreadCount };
 };
 
 const createSellerNotification = async ({ sellerId, userId, role, type, category = 'autre', title, message, metadata = {} }) => {
   const recipientId = userId || sellerId;
   const recipientRole = role || 'vendeur';
+  const recipientLanguage = (await require('../models/user.model').findById(recipientId).select('language').lean())?.language === 'en' ? 'en' : 'fr';
   const vehicle = await findNotificationVehicle(metadata);
   const vehicleDetails = vehicleDetailsOf(vehicle);
   const enrichedMetadata = vehicleDetails ? { ...metadata, vehicleDetails } : metadata;
@@ -95,7 +100,7 @@ const createSellerNotification = async ({ sellerId, userId, role, type, category
     type,
     category,
     title,
-    message: withVehicleDetails(message, vehicleDetails),
+    message: withVehicleDetails(message, vehicleDetails, recipientLanguage),
     metadata: enrichedMetadata
   });
 };

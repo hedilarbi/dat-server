@@ -106,6 +106,7 @@ app.use(cors({
   },
   credentials: true, // Autorise l'envoi de cookies JWT
 }));
+app.use(require('./utils/localizeMessage').localizeErrorResponses);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());

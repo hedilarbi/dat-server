@@ -1,4 +1,5 @@
 const User = require('../models/user.model');
+const { pickLanguage } = require('../utils/localizeMessage');
 const RefusalReason = require('../models/refusalReason.model');
 const VehicleDossier = require('../models/vehicleDossier.model');
 const Ticket = require('../models/ticket.model');
@@ -199,7 +200,7 @@ const discardProfileChange = async (user, { motifs, comment }) => {
     await sendEmail({ to: user.email, ...profileChangeRejectedEmail({ user, reasonsText, reasonsPlain, comment }) });
     await notificationService.createUserNotification({
       userId: user._id, role: user.role, type: 'profile_change_rejected', category: 'inscription',
-      title: 'Modification de compte refusée', message: `Votre demande de modification n'a pas été acceptée : ${reasonsPlain}.`
+      title: pickLanguage(user, 'Modification de compte refusée', 'Account change refused'), message: pickLanguage(user, `Votre demande de modification n'a pas été acceptée : ${reasonsPlain}.`, `Your change request was not accepted: ${reasonsPlain}.`)
     });
   } catch (emailError) {
     console.error(`Erreur d'envoi du mail de refus de modification : ${emailError.message}`);
@@ -282,7 +283,7 @@ const approveUser = async (userId) => {
     });
     await notificationService.createUserNotification({
       userId: user._id, role: user.role, type: 'account_approved', category: 'inscription',
-      title: wasProfileChange ? 'Modification de compte validée' : 'Compte validé', message: wasProfileChange ? 'Vos modifications de profil ont été validées.' : 'Votre compte professionnel a été validé.'
+      title: pickLanguage(user, wasProfileChange ? 'Modification de compte validée' : 'Compte validé', wasProfileChange ? 'Account change approved' : 'Account approved'), message: pickLanguage(user, wasProfileChange ? 'Vos modifications de profil ont été validées.' : 'Votre compte professionnel a été validé.', wasProfileChange ? 'Your profile changes have been approved.' : 'Your professional account has been approved.')
     });
   } catch (emailError) {
     console.error(`Erreur d'envoi du mail d'approbation : ${emailError.message}`);
@@ -295,8 +296,8 @@ const approveUser = async (userId) => {
     const messages = [{
       to: user.expoPushToken,
       sound: 'default',
-      title: 'Votre compte est activé !',
-      body: 'Félicitations, votre compte professionnel a été validé.',
+      title: pickLanguage(user, 'Votre compte est activé !', 'Your account is activated!'),
+      body: pickLanguage(user, 'Félicitations, votre compte professionnel a été validé.', 'Congratulations, your professional account has been approved.'),
       data: { status: 'valide' },
     }];
 
@@ -365,7 +366,7 @@ const rejectUser = async (userId, { motifs, comment }) => {
     });
     await notificationService.createUserNotification({
       userId: user._id, role: user.role, type: 'account_rejected', category: 'inscription',
-      title: 'Inscription refusée', message: `Votre inscription a été refusée : ${reasonsPlain}.`
+      title: pickLanguage(user, 'Inscription refusée', 'Registration refused'), message: pickLanguage(user, `Votre inscription a été refusée : ${reasonsPlain}.`, `Your registration was refused: ${reasonsPlain}.`)
     });
   } catch (emailError) {
     console.error(`Erreur d'envoi du mail de refus : ${emailError.message}`);
@@ -378,8 +379,8 @@ const rejectUser = async (userId, { motifs, comment }) => {
     const messages = [{
       to: user.expoPushToken,
       sound: 'default',
-      title: 'Action requise : Inscription refusée',
-      body: 'Votre inscription a été refusée. Veuillez consulter votre espace pour corriger votre dossier.',
+      title: pickLanguage(user, 'Action requise : Inscription refusée', 'Action required: registration refused'),
+      body: pickLanguage(user, 'Votre inscription a été refusée. Veuillez consulter votre espace pour corriger votre dossier.', 'Your registration was refused. Please check your space to correct your file.'),
       data: { status: 'refuse' },
     }];
 
@@ -443,7 +444,7 @@ const requestCorrection = async (userId, { motifs, comment }) => {
     });
     await notificationService.createUserNotification({
       userId: user._id, role: user.role, type: 'account_correction_requested', category: 'inscription',
-      title: 'Correction demandée', message: `Votre inscription doit être corrigée : ${reasonsPlain}.`
+      title: pickLanguage(user, 'Correction demandée', 'Correction requested'), message: pickLanguage(user, `Votre inscription doit être corrigée : ${reasonsPlain}.`, `Your registration must be corrected: ${reasonsPlain}.`)
     });
   } catch (emailError) {
     console.error(`Erreur d'envoi du mail de correction : ${emailError.message}`);
@@ -455,8 +456,8 @@ const requestCorrection = async (userId, { motifs, comment }) => {
     const messages = [{
       to: user.expoPushToken,
       sound: 'default',
-      title: 'Correction demandée sur votre dossier',
-      body: 'Veuillez consulter votre espace pour mettre à jour votre dossier.',
+      title: pickLanguage(user, 'Correction demandée sur votre dossier', 'Correction requested on your file'),
+      body: pickLanguage(user, 'Veuillez consulter votre espace pour mettre à jour votre dossier.', 'Please check your space to update your file.'),
       data: { status: 'correction_demandee' },
     }];
 
@@ -517,9 +518,9 @@ const updateUserStatus = async (userId, newStatus, { suspensionNote } = {}) => {
   // Notification in-app du titulaire : suspension, blocage ou réactivation de son compte
   try {
     const suspensionTexts = {
-      suspendu: ['Compte suspendu', 'Votre compte a été suspendu par l’administration. Contactez le support pour plus d’informations.'],
-      bloque: ['Compte bloqué', 'Votre compte a été bloqué par l’administration. Contactez le support pour plus d’informations.'],
-      valide: ['Compte réactivé', 'Votre compte a été réactivé : vous pouvez de nouveau utiliser la plateforme.'],
+      suspendu: [pickLanguage(user, 'Compte suspendu', 'Account suspended'), pickLanguage(user, 'Votre compte a été suspendu par l’administration. Contactez le support pour plus d’informations.', 'Your account has been suspended by the administration. Contact support for more information.')],
+      bloque: [pickLanguage(user, 'Compte bloqué', 'Account blocked'), pickLanguage(user, 'Votre compte a été bloqué par l’administration. Contactez le support pour plus d’informations.', 'Your account has been blocked by the administration. Contact support for more information.')],
+      valide: [pickLanguage(user, 'Compte réactivé', 'Account reactivated'), pickLanguage(user, 'Votre compte a été réactivé : vous pouvez de nouveau utiliser la plateforme.', 'Your account has been reactivated: you can use the platform again.')],
     };
     const [title, message] = suspensionTexts[newStatus];
     await notificationService.createUserNotification({ userId: user._id, role: user.role, type: `account_${newStatus}`, category: 'inscription', title, message });

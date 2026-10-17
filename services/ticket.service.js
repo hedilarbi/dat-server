@@ -1,4 +1,5 @@
 const Ticket = require('../models/ticket.model');
+const { pickLanguage } = require('../utils/localizeMessage');
 const User = require('../models/user.model');
 const { sendEmail } = require('../config/mail');
 const { supportTicketAdminReplyEmail, adminSupportTicketEmail } = require('./emailTemplates.service');
@@ -48,12 +49,13 @@ const notifyAdminOfUserReply = async (ticket, userId) => {
 const notifySellerInApp = async (ticket) => {
   try {
     const ownerId = ticket.user?._id || ticket.user;
+    const owner = await User.findById(ownerId).select('language').lean();
     await createUserNotification({
       userId: ownerId,
       type: 'support_reply',
       category: 'support',
-      title: 'Réponse du support',
-      message: `L'équipe DealAutoPro a répondu à votre demande : "${ticket.title}".`,
+      title: pickLanguage(owner, 'Réponse du support', 'Support reply'),
+      message: pickLanguage(owner, `L'équipe DealAutoPro a répondu à votre demande : "${ticket.title}".`, `The DealAutoPro team has replied to your request: "${ticket.title}".`),
       metadata: { ticketId: String(ticket._id) }
     });
   } catch (err) {

@@ -1,4 +1,5 @@
 const VehicleDossier = require('../models/vehicleDossier.model');
+const { pickLanguage } = require('./../utils/localizeMessage');
 const User = require('../models/user.model');
 const Sale = require('../models/sale.model');
 const Offer = require('../models/offer.model');
@@ -518,12 +519,12 @@ const approveDossier = async (dossierId) => {
   await dossier.save();
   await notificationService.createSellerNotification({
     sellerId: seller._id, type: 'vehicle_dossier_approved', category: 'dossier_vehicule',
-    title: 'Dossier véhicule validé', message: `Votre dossier « ${vehicleLabel} » a été validé.`,
+    title: pickLanguage(seller, 'Dossier véhicule validé', 'Vehicle file approved'), message: pickLanguage(seller, `Votre dossier « ${vehicleLabel} » a été validé.`, `Your file “${vehicleLabel}” has been approved.`),
     metadata: { dossierId: dossier._id.toString(), status: 'valide' }
   });
   await sendPushNotification(seller, {
-    title: 'Dossier véhicule validé !',
-    body: `Votre dossier "${vehicleLabel}" a été validé.`,
+    title: pickLanguage(seller, 'Dossier véhicule validé !', 'Vehicle file approved!'),
+    body: pickLanguage(seller, `Votre dossier "${vehicleLabel}" a été validé.`, `Your file "${vehicleLabel}" has been approved.`),
     data: { dossierId: dossier._id.toString(), status: 'valide' },
   });
 
@@ -552,12 +553,12 @@ const rejectDossier = async (dossierId, { motifs, comment }) => {
   await dossier.save();
   await notificationService.createSellerNotification({
     sellerId: seller._id, type: 'vehicle_dossier_rejected', category: 'dossier_vehicule',
-    title: 'Dossier véhicule refusé', message: `Votre dossier « ${vehicleLabel} » a été refusé : ${reasonsPlain}.`,
+    title: pickLanguage(seller, 'Dossier véhicule refusé', 'Vehicle file refused'), message: pickLanguage(seller, `Votre dossier « ${vehicleLabel} » a été refusé : ${reasonsPlain}.`, `Your file “${vehicleLabel}” was refused: ${reasonsPlain}.`),
     metadata: { dossierId: dossier._id.toString(), status: 'refuse' }
   });
   await sendPushNotification(seller, {
-    title: 'Dossier véhicule refusé',
-    body: `Votre dossier "${vehicleLabel}" a été refusé. Consultez votre espace pour plus de détails.`,
+    title: pickLanguage(seller, 'Dossier véhicule refusé', 'Vehicle file refused'),
+    body: pickLanguage(seller, `Votre dossier "${vehicleLabel}" a été refusé. Consultez votre espace pour plus de détails.`, `Your file "${vehicleLabel}" was refused. Check your space for details.`),
     data: { dossierId: dossier._id.toString(), status: 'refuse' },
   });
 
@@ -586,12 +587,12 @@ const requestDossierCorrection = async (dossierId, { motifs, comment }) => {
   await dossier.save();
   await notificationService.createSellerNotification({
     sellerId: seller._id, type: 'vehicle_dossier_correction_requested', category: 'dossier_vehicule',
-    title: 'Correction demandée', message: `Le dossier « ${vehicleLabel} » doit être corrigé : ${reasonsPlain}.`,
+    title: pickLanguage(seller, 'Correction demandée', 'Correction requested'), message: pickLanguage(seller, `Le dossier « ${vehicleLabel} » doit être corrigé : ${reasonsPlain}.`, `The file “${vehicleLabel}” must be corrected: ${reasonsPlain}.`),
     metadata: { dossierId: dossier._id.toString(), status: 'correction_demandee' }
   });
   await sendPushNotification(seller, {
-    title: 'Correction demandée sur votre dossier véhicule',
-    body: `Veuillez mettre à jour le dossier "${vehicleLabel}" dans votre espace.`,
+    title: pickLanguage(seller, 'Correction demandée sur votre dossier véhicule', 'Correction requested on your vehicle file'),
+    body: pickLanguage(seller, `Veuillez mettre à jour le dossier "${vehicleLabel}" dans votre espace.`, `Please update the file "${vehicleLabel}" in your space.`),
     data: { dossierId: dossier._id.toString(), status: 'correction_demandee' },
   });
 
