@@ -391,7 +391,8 @@ const adminListDossiers = async (filters = {}) => {
   if (columnFilters.mileage && Number.isFinite(Number(columnFilters.mileage))) query.mileage = Number(columnFilters.mileage);
   if (columnFilters.registrationCardAvailable === 'true') query.registrationCardAvailable = true;
   if (columnFilters.registrationCardAvailable === 'false') query.registrationCardAvailable = false;
-  if (columnFilters.status) query.status = columnFilters.status;
+  // « attente » regroupe les dossiers à traiter par l'admin (comme la carte du tableau de bord)
+  if (columnFilters.status) query.status = columnFilters.status === 'attente' ? { $in: ['soumis', 'en_attente_validation'] } : columnFilters.status;
   if (columnFilters.submittedAt) {
     const start = new Date(`${columnFilters.submittedAt}T00:00:00.000Z`);
     const end = new Date(`${columnFilters.submittedAt}T23:59:59.999Z`);
