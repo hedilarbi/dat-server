@@ -3,6 +3,7 @@ const router = express.Router();
 const Session = require('../models/session.model');
 const VehicleDossier = require('../models/vehicleDossier.model');
 const Offer = require('../models/offer.model');
+const Sale = require('../models/sale.model');
 const sessionService = require('../services/session.service');
 const { protect } = require('../middlewares/auth.middleware');
 const { adminOnly } = require('../middlewares/role.middleware');
@@ -40,9 +41,19 @@ router.get('/', protect, adminOnly, async (req, res) => {
     // Pour chaque session, compter le nombre de véhicules associés
     const sessionsWithCount = await Promise.all(
       sessions.map(async (session) => {
-        const count = await VehicleDossier.countDocuments({
+        let count = await VehicleDossier.countDocuments({
           $or: [{ session: session._id.toString() }, { session: session._id }],
         });
+        // Les véhicules vendus avant la clôture n'ont plus de session mais comptent toujours dans celle-ci
+        if (!['closed', 'cloturee'].includes(session.status)) {
+          const soldVehicleIds = (await Sale.find({ session: session._id }).select('vehicle').lean()).map((sale) => sale.vehicle);
+          if (soldVehicleIds.length) {
+            count += await VehicleDossier.countDocuments({
+              _id: { $in: soldVehicleIds },
+              $nor: [{ session: session._id.toString() }, { session: session._id }],
+            });
+          }
+        }
         return {
           ...session,
           vehicleCount: count,
@@ -119,9 +130,23 @@ router.get('/:id', protect, adminOnly, async (req, res) => {
 
     // Les trois meilleures offres actives de chaque véhicule, pour que l'admin juge la session
     // d'un coup d'œil ; la liste complète et l'historique s'ouvrent à la demande.
+    // Véhicules dont le vendeur a retenu une offre avant la clôture : ils quittent la session (plus
+    // d'offre possible) mais doivent rester visibles pour l'administrateur dans cette session.
+    const isClosed = ['closed', 'cloturee'].includes(session.status);
+    const attachedIds = new Set(vehicles.map((vehicle) => String(vehicle._id)));
+    const soldSales = isClosed ? [] : (await Sale.find({ session: session._id })
+      .select('vehicle status amount winner currentStep')
+      .populate('winner', 'companyName firstName lastName')
+      .lean()).filter((sale) => !attachedIds.has(String(sale.vehicle)));
+    const soldVehicles = soldSales.length
+      ? await VehicleDossier.find({ _id: { $in: soldSales.map((sale) => sale.vehicle) } })
+        .populate('seller', 'companyName firstName lastName email status')
+        .lean()
+      : [];
+
     const activeOffers = await Offer.find({
       session: session._id,
-      vehicle: { $in: vehicles.map((vehicle) => vehicle._id) },
+      vehicle: { $in: [...vehicles, ...soldVehicles].map((vehicle) => vehicle._id) },
       status: 'active',
     })
       .populate('buyer', 'companyName firstName lastName')
@@ -148,7 +173,31 @@ router.get('/:id', protect, adminOnly, async (req, res) => {
         })),
       };
     });
-    session.vehicleCount = vehicles.length;
+    const saleByVehicle = new Map(soldSales.map((sale) => [String(sale.vehicle), sale]));
+    session.soldVehicles = soldVehicles.map((vehicle) => {
+      const offers = offersByVehicle.get(String(vehicle._id)) || [];
+      const sale = saleByVehicle.get(String(vehicle._id));
+      const winner = sale?.winner;
+      return {
+        ...vehicle,
+        offerCount: offers.length,
+        topOffers: offers.slice(0, 3).map((offer) => ({
+          _id: offer._id,
+          amount: offer.amount,
+          buyerName: offer.buyer?.companyName || [offer.buyer?.firstName, offer.buyer?.lastName].filter(Boolean).join(' ') || 'Acheteur',
+          at: offer.amountUpdatedAt || offer.updatedAt,
+          modified: (offer.revisions || []).length > 0,
+        })),
+        sale: sale ? {
+          id: String(sale._id),
+          status: sale.status,
+          amount: sale.amount ?? null,
+          winnerId: winner ? String(winner._id) : null,
+          winnerName: winner ? (winner.companyName || [winner.firstName, winner.lastName].filter(Boolean).join(' ')) : null,
+        } : null,
+      };
+    });
+    session.vehicleCount = vehicles.length + soldVehicles.length;
 
     // Session clôturée : résultat de chaque véhicule, y compris ceux qui n'ont plus de lien avec elle
     // (invendus retournés en attente). Sans cela, l'admin ne voit que les véhicules vendus.
