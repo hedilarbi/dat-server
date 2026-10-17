@@ -1848,3 +1848,29 @@ const adminSupportTicketEmail = ({ user, ticket, content, isReply = false }) => 
 };
 
 module.exports.adminSupportTicketEmail = adminSupportTicketEmail;
+
+/** Les deux parties ont signalé une erreur sur les documents d'une vente : information de l'admin. */
+const adminDocumentsDisputeEmail = ({ saleId, vehicleLabel, sellerLabel, buyerLabel, sellerReason, buyerReason }) => {
+  const adminBaseUrl = process.env.ADMIN_BASE_URL || process.env.ADMIN_URL || 'http://localhost:3002';
+  const url = `${adminBaseUrl}/ventes/${saleId}`;
+  const reasonLabel = (reason) => DOCUMENT_REPORT_REASON_LABELS.fr[reason] || reason || '—';
+  return {
+    subject: `Documents contestés par les deux parties - ${vehicleLabel}`,
+    text: `${sellerLabel} (${reasonLabel(sellerReason)}) et ${buyerLabel} (${reasonLabel(buyerReason)}) ont chacun signalé une erreur sur les documents de la vente de ${vehicleLabel}. Consultez la vente : ${url}`,
+    html: layout({
+      heading: 'Documents contestés par les deux parties',
+      footer: 'Système de supervision DealAutoPro',
+      body: `
+        <p style="color:#1A2230;font-size:16px;">Bonjour,</p>
+        <p style="color:#5A5E66;font-size:14px;">Les deux parties ont signalé une erreur sur les documents de la vente de <strong>${vehicleLabel}</strong>. Chacune peut redéposer une version corrigée ; la première version déposée est retenue et les deux parties la revérifient.</p>
+        <div style="background-color:#fff7f1;border-left:4px solid #B04A2C;padding:15px;margin:20px 0;">
+          <p style="margin:0 0 8px 0;"><strong>Vendeur :</strong> ${sellerLabel} — ${reasonLabel(sellerReason)}</p>
+          <p style="margin:0;"><strong>Acheteur :</strong> ${buyerLabel} — ${reasonLabel(buyerReason)}</p>
+        </div>
+        <div style="text-align:center;margin:30px 0;"><a href="${url}" style="background-color:#B04A2C;color:white;padding:12px 25px;text-decoration:none;border-radius:5px;font-weight:bold;">Ouvrir la vente</a></div>
+      `,
+    }),
+  };
+};
+
+module.exports.adminDocumentsDisputeEmail = adminDocumentsDisputeEmail;

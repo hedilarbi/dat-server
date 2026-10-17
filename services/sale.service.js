@@ -2321,10 +2321,15 @@ const submitRegistrationCard = async ({ saleId, sellerId, formulaNumber, registr
  * e-mail (celle qui agit est déjà sur la vente). Sans elle (tâche de fond), les deux le sont.
  * Renvoie true quand les documents viennent d'être générés.
  */
-const prepareSaleDocuments = async (saleId, { triggeredBy } = {}) => {
+const prepareSaleDocuments = async (saleId, { triggeredBy, regenerate = false } = {}) => {
   const sale = await Sale.findById(saleId).lean();
   if (!sale || sale.status !== 'en_cours' || sale.currentStep !== STEP.VERIFICATION) return false;
-  if ((sale.documentsReview?.version || 0) > 0) return false;
+  const currentVersion = sale.documentsReview?.version || 0;
+  // Régénération (tampon corrigé après un signalement) : uniquement sur des documents encore générés
+  // par la plateforme, pour ne jamais écraser une version corrigée déposée à la main.
+  if (regenerate) {
+    if (currentVersion === 0 || sale.certificate?.source !== 'generated' || sale.purchaseDeclaration?.source !== 'generated') return false;
+  } else if (currentVersion > 0) return false;
 
   const [vehicle, seller, buyer] = await Promise.all([
     VehicleDossier.findById(sale.vehicle)
@@ -2357,16 +2362,18 @@ const prepareSaleDocuments = async (saleId, { triggeredBy } = {}) => {
   const documentOf = (stored) => ({ url: stored.url, filename: stored.filename, source: 'generated', generatedAt: now, updatedAt: now });
   // Mise à jour conditionnelle : un dépôt de tampon et la tâche de fond peuvent arriver ensemble.
   const result = await Sale.updateOne(
-    { _id: sale._id, status: 'en_cours', currentStep: STEP.VERIFICATION, 'documentsReview.version': { $in: [0, null] } },
+    { _id: sale._id, status: 'en_cours', currentStep: STEP.VERIFICATION, 'documentsReview.version': regenerate ? currentVersion : { $in: [0, null] } },
     {
       $set: {
         certificate: documentOf(storedCertificate),
         purchaseDeclaration: documentOf(storedDeclaration),
-        'documentsReview.version': 1,
-        'documentsReview.correctionOpen': false,
+        'documentsReview.version': currentVersion + 1,
+        // Une régénération garde la correction ouverte : le dossier reste en cours de rectification
+        'documentsReview.correctionOpen': regenerate,
         'documentsReview.seller': null,
         'documentsReview.buyer': null,
       },
+      ...(regenerate ? { $push: { 'documentsReview.history': { type: 'depot', by: triggeredBy, document: null, url: null, version: currentVersion + 1 } } } : {}),
     },
   );
   if (result.modifiedCount !== 1) return false;
@@ -2392,9 +2399,58 @@ const prepareDocumentsForUser = async (userId) => {
       console.error(`Génération des documents impossible (vente ${sale._id}) : ${error.message}`);
     }
   }
+
+  // Un tampon signalé comme manquant ou mauvais vient d'être corrigé : les documents sont régénérés
+  // avec les tampons actuels des deux parties. Quand chacune corrige le sien, le dernier dépôt
+  // produit donc des documents qui réunissent les deux corrections.
+  const STAMP_REASONS = ['tampon_manquant', 'mauvais_tampon'];
+  const disputed = await Sale.find({
+    status: 'en_cours',
+    currentStep: STEP.VERIFICATION,
+    'documentsReview.version': { $gt: 0 },
+    'documentsReview.correctionOpen': true,
+    $or: [{ seller: userId }, { winner: userId }],
+  }).select('_id seller documentsReview').lean();
+  for (const sale of disputed) {
+    const side = String(sale.seller) === String(userId) ? 'seller' : 'buyer';
+    const reported = sale.documentsReview?.[side === 'seller' ? 'buyer' : 'seller'];
+    const ownReport = sale.documentsReview?.[side];
+    const stampReportedAgainstMe = reported?.decision === 'erreur' && STAMP_REASONS.includes(reported.reason);
+    // Aussi quand l'utilisateur avait lui-même signalé le tampon de l'autre : son tampon à jour
+    // est alors pris en compte dans la nouvelle version.
+    const stampReportedByMe = ownReport?.decision === 'erreur' && STAMP_REASONS.includes(ownReport.reason);
+    if (!stampReportedAgainstMe && !stampReportedByMe) continue;
+    try {
+      await prepareSaleDocuments(sale._id, { triggeredBy: side, regenerate: true });
+    } catch (error) {
+      console.error(`Régénération des documents impossible (vente ${sale._id}) : ${error.message}`);
+    }
+  }
 };
 
 const REVIEW_DOCUMENTS = ['certificate', 'purchaseDeclaration'];
+
+/** Les deux parties ont signalé une erreur sur les documents : notification et e-mail à l'administrateur. */
+const notifyAdminOfDocumentsDispute = async (sale) => {
+  try {
+    const [seller, buyer, vehicle, config] = await Promise.all([
+      User.findById(sale.seller).select('companyName firstName lastName').lean(),
+      User.findById(sale.winner).select('companyName firstName lastName').lean(),
+      VehicleDossier.findById(sale.vehicle).select('brand model registrationNumber').lean(),
+      generalConfigService.getConfig(),
+    ]);
+    const name = (user) => user?.companyName || [user?.firstName, user?.lastName].filter(Boolean).join(' ') || '—';
+    const vehicleLabel = [vehicle?.brand, vehicle?.model].filter(Boolean).join(' ') || 'Véhicule';
+    await notificationService.createAdminDocumentsDisputeNotification(sale, vehicle, seller, buyer);
+    const email = emailTemplates.adminDocumentsDisputeEmail({
+      saleId: String(sale._id), vehicleLabel, sellerLabel: name(seller), buyerLabel: name(buyer),
+      sellerReason: sale.documentsReview.seller?.reason, buyerReason: sale.documentsReview.buyer?.reason,
+    });
+    await sendEmail({ to: config?.adminEmail || 'contact@dealautopro.com', subject: email.subject, text: email.text, html: email.html });
+  } catch (error) {
+    console.error(`Alerte admin (litige documents, vente ${sale._id}) impossible : ${error.message}`);
+  }
+};
 
 /**
  * Étape 3.2 : une partie valide les documents ou signale une erreur. Un signalement ouvre la
@@ -2430,6 +2486,10 @@ const reviewDocuments = async ({ saleId, userId, decision, reason, comment }) =>
 
   if (isReport) {
     await notifyDocumentsEvent(sale, 'reported', [side === 'seller' ? 'buyer' : 'seller'], { by: side, reason, comment: note });
+    // Les deux parties contestent les documents : l'administration en est prévenue pour arbitrer
+    if (sale.documentsReview.seller?.decision === 'erreur' && sale.documentsReview.buyer?.decision === 'erreur') {
+      await notifyAdminOfDocumentsDispute(sale);
+    }
     return { side };
   }
 
@@ -2472,6 +2532,18 @@ const uploadReviewDocument = async ({ saleId, userId, document, url, filename })
   const { sale, side } = await loadPartySale(saleId, userId, STEP.VERIFICATION, "Les documents ne sont pas à l'étape de vérification.");
   if (!sale.documentsReview?.correctionOpen) {
     throw saleError("Un document ne peut être redéposé qu'après le signalement d'une erreur.", 'sale.correction_closed', 409);
+  }
+  // Seule la partie visée par un signalement redépose : celle qui a signalé l'erreur attend la
+  // version corrigée. Si les deux parties ont signalé, chacune est visée par l'autre et peut donc
+  // corriger ; le premier dépôt ouvre une nouvelle version que les deux revérifient.
+  const otherSide = side === 'seller' ? 'buyer' : 'seller';
+  if (sale.documentsReview[otherSide]?.decision !== 'erreur') {
+    // Les deux avis sont remis à zéro quand une version corrigée est déposée : si les deux parties
+    // avaient signalé, le premier dépôt l'emporte et le second arrive trop tard.
+    if (!sale.documentsReview.seller && !sale.documentsReview.buyer) {
+      throw saleError("Un document corrigé vient d'être déposé. Vérifiez-le avant d'en déposer un autre.", 'sale.correction_superseded', 409);
+    }
+    throw saleError("Seule la partie visée par le signalement peut redéposer le document.", 'sale.correction_not_allowed', 403);
   }
 
   // Le document part ensuite à la signature : il doit être un PDF exploitable.

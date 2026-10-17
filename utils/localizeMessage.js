@@ -4,6 +4,8 @@
  * message est remplacé ici par sa version anglaise avant l'envoi de la réponse.
  */
 const EXACT = {
+  "Seule la partie visée par le signalement peut redéposer le document.": "Only the party concerned by the report can upload the document again.",
+  "Un document corrigé vient d'être déposé. Vérifiez-le avant d'en déposer un autre.": "A corrected document has just been uploaded. Review it before uploading another one.",
   "Offre acceptée. La procédure d'achat a commencé.": "Offer accepted. The purchase procedure has started.",
   "Adresse e-mail vérifiée avec succès. Utilisateur connecté.": "E-mail address verified successfully. User logged in.",
   "Code de réinitialisation envoyé par e-mail.": "Reset code sent by e-mail.",

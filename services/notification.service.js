@@ -364,6 +364,20 @@ const createAdminSellerEarlyAcceptanceNotification = async (sale, vehicle, selle
   });
 };
 
+/** Les deux parties ont signalé une erreur sur les documents de la vente (étape 3.2) : l'admin doit suivre. */
+const createAdminDocumentsDisputeNotification = async (sale, vehicle, seller, buyer) => {
+  const label = (user) => user?.companyName || [user?.firstName, user?.lastName].filter(Boolean).join(' ') || '—';
+  const vehicleLabel = [vehicle?.brand, vehicle?.model].filter(Boolean).join(' ') || 'Véhicule';
+  return Notification.create({
+    recipientRole: 'admin',
+    type: 'certificate_rejected',
+    category: 'ventes',
+    title: 'Documents contestés par les deux parties',
+    message: `${label(seller)} et ${label(buyer)} ont chacun signalé une erreur sur les documents de la vente de ${vehicleLabel}. Chacun peut redéposer une version corrigée.`,
+    metadata: { saleId: sale._id.toString(), vehicleId: vehicle?._id ? vehicle._id.toString() : null, vehicleLabel },
+  });
+};
+
 const createAdminCertificateRejectedNotification = async (sale, vehicle, buyer, seller) => {
   const vehicleLabel = [vehicle.brand, vehicle.model].filter(Boolean).join(' ') || 'Véhicule';
 
@@ -410,6 +424,7 @@ module.exports = {
   createAdminSaleDeadlineSuspensionNotification,
   createAdminSellerEarlyAcceptanceNotification,
   createAdminCertificateRejectedNotification,
+  createAdminDocumentsDisputeNotification,
   markNotificationAsRead,
   markAllAdminNotificationsAsRead
 };
